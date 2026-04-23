@@ -1,5 +1,61 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy } from 'lucide-react';
+import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy, Upload, LocateFixed, RefreshCw } from 'lucide-react';
+
+// Tiny persistence wrapper. Same API as useState, but reads/writes localStorage.
+function useLocalState(key, defaultValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved !== null) return JSON.parse(saved);
+    } catch (e) { /* ignore */ }
+    return defaultValue;
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore quota/private-mode */ }
+  }, [key, value]);
+  return [value, setValue];
+}
+
+// Resize a picked image file to a square base64 data URL (default 256px).
+function fileToAvatarDataURL(file, size = 256) {
+  return new Promise((resolve, reject) => {
+    if (!file) return reject(new Error('no file'));
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        // Cover-fit crop to square
+        const scale = Math.max(size / img.width, size / img.height);
+        const w = img.width * scale, h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Reverse-geocode lat/lng to "City, ST" via Nominatim (free, no key).
+async function reverseGeocode(lat, lng) {
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10&addressdetails=1`, {
+      headers: { 'Accept': 'application/json' }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.address || {};
+    const city = a.city || a.town || a.village || a.hamlet || a.county || '';
+    const state = a.state_code || a.state || '';
+    if (!city && !state) return null;
+    return [city, state].filter(Boolean).join(', ');
+  } catch (e) { return null; }
+}
 
 const checkeredStyle = (color1 = '#3b82f6', color2 = '#ffffff', size = 12) => ({
   backgroundImage: `linear-gradient(45deg, ${color1} 25%, transparent 25%), linear-gradient(-45deg, ${color1} 25%, transparent 25%), linear-gradient(45deg, transparent 75%, ${color1} 75%), linear-gradient(-45deg, transparent 75%, ${color1} 75%)`,
@@ -18,12 +74,15 @@ function VerifiedBadge({ size = 12 }) {
 }
 
 export default function RideoutApp() {
-  const [onboarded, setOnboarded] = useState(false);
+  const [onboarded, setOnboarded] = useLocalState('rideout_onboarded', false);
   const [onboardStep, setOnboardStep] = useState(0);
-  const [profile, setProfile] = useState({
+  const [profile, setProfile] = useLocalState('rideout_profile', {
     name: '', city: '', rideTypes: ['bike'],
     verified: false, level: 'moderate',
-    trustedContact: null, shareLocation: false
+    trustedContact: null, shareLocation: false,
+    avatar: null,            // base64 data URL
+    coords: null,            // { lat, lng } once granted
+    locationSharedWith: []   // friend ids
   });
   const [showDemoTour, setShowDemoTour] = useState(false);
   const [activeTab, setActiveTab] = useState('discover');
@@ -34,8 +93,8 @@ export default function RideoutApp() {
   const [filterType, setFilterType] = useState('all');
   const [levelFilter, setLevelFilter] = useState('all');
   const [beginnerFriendly, setBeginnerFriendly] = useState(false);
-  const [joinedEvents, setJoinedEvents] = useState([]);
-  const [checkedIn, setCheckedIn] = useState({});
+  const [joinedEvents, setJoinedEvents] = useLocalState('rideout_joinedEvents', []);
+  const [checkedIn, setCheckedIn] = useLocalState('rideout_checkedIn', {});
   const [mapView, setMapView] = useState('street');
   const [chatEventId, setChatEventId] = useState(null);
   const [showFriends, setShowFriends] = useState(false);
@@ -65,11 +124,12 @@ export default function RideoutApp() {
     accentColor: 'from-pink-500 to-blue-500'
   });
 
-  const [friends, setFriends] = useState([]);
-  const [crews, setCrews] = useState([]);
-  const [shops, setShops] = useState([]);
-  const [events, setEvents] = useState([]);
-  const [feedPosts, setFeedPosts] = useState([]);
+  const [friends, setFriends] = useLocalState('rideout_friends', []);
+  const [crews, setCrews] = useLocalState('rideout_crews', []);
+  const [shops, setShops] = useLocalState('rideout_shops', []);
+  const [events, setEvents] = useLocalState('rideout_events', []);
+  const [feedPosts, setFeedPosts] = useLocalState('rideout_feedPosts', []);
+  const [showShareLocation, setShowShareLocation] = useState(false);
 
   const rideIcons = { bike: Bike, ebike: Bike, skates: Zap, scooter: Navigation, escooter: Navigation, other: Bike };
   const rideColors = { bike: 'bg-pink-500', ebike: 'bg-amber-400', skates: 'bg-blue-500', scooter: 'bg-cyan-400', escooter: 'bg-lime-400', other: 'bg-fuchsia-500' };
@@ -155,8 +215,10 @@ export default function RideoutApp() {
               <button onClick={() => setShowFriends(true)} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white">
                 <Users size={18} />
               </button>
-              <button onClick={() => setActiveTab('profile')} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white">
-                <User size={18} />
+              <button onClick={() => setActiveTab('profile')} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white overflow-hidden">
+                {profile.avatar
+                  ? <img src={profile.avatar} alt="" className="w-full h-full object-cover" />
+                  : <User size={18} />}
               </button>
             </div>
           </div>
@@ -218,12 +280,13 @@ export default function RideoutApp() {
           <ProfileScreen
             profile={profile} setProfile={setProfile}
             joinedEvents={joinedEvents} friendIds={friendIds} joinedCrewIds={joinedCrewIds}
-            events={events} crews={crews}
+            events={events} crews={crews} friends={friends}
             rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels}
             formatDate={formatDate} onEventClick={setSelectedEvent}
             onOpenFriends={() => setShowFriends(true)}
             onOpenTrustedContact={() => setShowTrustedContact(true)}
             onOpenSOS={() => setShowSOS(true)}
+            onOpenShareLocation={() => setShowShareLocation(true)}
             setActiveTab={setActiveTab} setSelectedCrew={setSelectedCrew}
           />
         )}
@@ -264,6 +327,7 @@ export default function RideoutApp() {
       {showSOS && <SOSModal onClose={() => setShowSOS(false)} trustedContact={profile.trustedContact} />}
       {showShops && <ShopsModal shops={shops} onClose={() => setShowShops(false)} />}
       {showTrustedContact && <TrustedContactModal profile={profile} setProfile={setProfile} onClose={() => setShowTrustedContact(false)} />}
+      {showShareLocation && <ShareLocationModal profile={profile} setProfile={setProfile} friends={friends} onClose={() => setShowShareLocation(false)} />}
       {showCreateCrew && (
         <CreateCrewModal
           profileCity={profile.city}
@@ -317,7 +381,7 @@ export default function RideoutApp() {
 function DiscoverScreen({ events, friendsEvents, friendIds, filterType, setFilterType, beginnerFriendly, setBeginnerFriendly, levelFilter, setLevelFilter, joinedEvents, onEventClick, mapView, setMapView, rideIcons, rideColors, rideLabels, electricTypes, formatDate, profile, segment, setSegment, shops, onShopsClick }) {
   return (
     <div>
-      <MapView mapView={mapView} setMapView={setMapView} events={events} rideIcons={rideIcons} rideColors={rideColors} onEventClick={onEventClick} showRoutes={true} location={profile.city} />
+      <MapView mapView={mapView} setMapView={setMapView} events={events} rideIcons={rideIcons} rideColors={rideColors} onEventClick={onEventClick} showRoutes={true} location={profile.city} profileCoords={profile.coords} />
 
       {/* Segmented control */}
       <div className="px-4 pt-3 pb-1 flex gap-1 bg-zinc-900/50 mx-4 mt-3 rounded-xl p-1">
@@ -771,17 +835,59 @@ function FeedPostCard({ post, onLike, rideColors, rideIcons }) {
 }
 
 // ===== PROFILE =====
-function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCrewIds, events, crews, rideIcons, rideColors, rideLabels, formatDate, onEventClick, onOpenFriends, onOpenTrustedContact, onOpenSOS, setActiveTab, setSelectedCrew }) {
+function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCrewIds, events, crews, friends, rideIcons, rideColors, rideLabels, formatDate, onEventClick, onOpenFriends, onOpenTrustedContact, onOpenSOS, onOpenShareLocation, setActiveTab, setSelectedCrew }) {
+  const fileRef = useRef(null);
+  const [locBusy, setLocBusy] = useState(false);
+  const [locMsg, setLocMsg] = useState('');
+
+  const onPickAvatar = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const data = await fileToAvatarDataURL(file, 256);
+      setProfile({ ...profile, avatar: data });
+    } catch (err) { /* ignore */ }
+    e.target.value = '';
+  };
+
+  const refreshLocation = () => {
+    if (!navigator.geolocation) { setLocMsg('Location not supported'); return; }
+    setLocBusy(true); setLocMsg('');
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      const city = await reverseGeocode(coords.lat, coords.lng);
+      setProfile({ ...profile, coords, city: city || profile.city });
+      setLocBusy(false);
+      setLocMsg(city ? `Updated to ${city}` : 'Location updated');
+      setTimeout(() => setLocMsg(''), 2500);
+    }, () => { setLocBusy(false); setLocMsg('Location permission denied'); setTimeout(() => setLocMsg(''), 2500); },
+    { enableHighAccuracy: true, timeout: 8000 });
+  };
+
+  const sharingCount = (profile.locationSharedWith || []).length;
+
   return (
     <div className="p-4">
       <div className="relative rounded-2xl overflow-hidden border-2 border-white/10">
         <div className="bg-gradient-to-br from-pink-500 via-pink-600 to-blue-500 p-6 text-center">
-          <div className="w-20 h-20 rounded-full bg-white/20 border-4 border-white mx-auto flex items-center justify-center relative">
-            <User size={36} />
-            {profile.verified && <div className="absolute -bottom-1 -right-1 bg-blue-400 rounded-full p-0.5 border-2 border-white"><BadgeCheck size={14} fill="white" className="text-blue-400" /></div>}
+          <div className="w-20 h-20 rounded-full bg-white/20 border-4 border-white mx-auto flex items-center justify-center relative overflow-hidden">
+            {profile.avatar
+              ? <img src={profile.avatar} alt="" className="w-full h-full object-cover" />
+              : <User size={36} />}
+            <button
+              type="button"
+              onClick={() => fileRef.current && fileRef.current.click()}
+              className="absolute -bottom-1 -right-1 bg-blue-500 rounded-full p-1.5 border-2 border-white shadow-lg active:scale-95"
+              aria-label="Upload profile picture">
+              <Camera size={12} />
+            </button>
+            {profile.verified && <div className="absolute -bottom-1 -left-1 bg-blue-400 rounded-full p-0.5 border-2 border-white"><BadgeCheck size={14} fill="white" className="text-blue-400" /></div>}
           </div>
+          <input ref={fileRef} type="file" accept="image/*" onChange={onPickAvatar} className="hidden" />
           <h2 className="text-xl font-black mt-3 uppercase flex items-center gap-1 justify-center">{profile.name}</h2>
-          <p className="text-sm text-white/90 font-semibold">{profile.city}</p>
+          <p className="text-sm text-white/90 font-semibold flex items-center justify-center gap-1.5">
+            <MapPin size={12} />{profile.city}
+          </p>
           <div className="flex justify-center gap-2 mt-3 flex-wrap">
             {profile.rideTypes.map(t => (
               <span key={t} className="bg-white/20 backdrop-blur px-3 py-1 rounded-full text-xs font-black border border-white/30">
@@ -789,6 +895,15 @@ function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCre
               </span>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={refreshLocation}
+            disabled={locBusy}
+            className="mt-3 inline-flex items-center gap-1.5 bg-white/20 backdrop-blur px-3 py-1.5 rounded-full text-[10px] font-black border border-white/40 uppercase tracking-wide disabled:opacity-60">
+            <RefreshCw size={12} className={locBusy ? 'animate-spin' : ''} />
+            {locBusy ? 'Updating…' : profile.coords ? 'Refresh location' : 'Use my location'}
+          </button>
+          {locMsg && <p className="mt-2 text-[10px] font-bold text-white/90">{locMsg}</p>}
         </div>
         <CheckeredStrip color1="#3b82f6" color2="#ffffff" />
       </div>
@@ -831,6 +946,18 @@ function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCre
             <div className="flex-1 min-w-0">
               <p className="text-sm font-black">Trusted contact</p>
               <p className="text-[10px] text-zinc-400 truncate">{profile.trustedContact ? `${profile.trustedContact.name} · shares your ride location` : 'Add a contact who gets your ride info'}</p>
+            </div>
+            <ChevronRight size={16} className="text-zinc-500" />
+          </button>
+          <button onClick={onOpenShareLocation} className="w-full bg-zinc-800 rounded-xl p-3 flex items-center gap-3 text-left">
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${sharingCount > 0 ? 'bg-pink-500' : 'bg-zinc-700'}`}>
+              <LocateFixed size={18} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-black">Share live location</p>
+              <p className="text-[10px] text-zinc-400 truncate">
+                {sharingCount > 0 ? `Sharing with ${sharingCount} rider${sharingCount === 1 ? '' : 's'}` : 'Pick which crew members see where you are'}
+              </p>
             </div>
             <ChevronRight size={16} className="text-zinc-500" />
           </button>
@@ -1000,6 +1127,65 @@ function TrustedContactModal({ profile, setProfile, onClose }) {
             Save contact
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== SHARE LIVE LOCATION =====
+function ShareLocationModal({ profile, setProfile, friends, onClose }) {
+  const shared = profile.locationSharedWith || [];
+  const crewFriends = friends.filter(f => f.isFriend);
+  const toggle = (id) => {
+    const next = shared.includes(id) ? shared.filter(x => x !== id) : [...shared, id];
+    setProfile({ ...profile, locationSharedWith: next });
+  };
+  const shareAll = () => setProfile({ ...profile, locationSharedWith: crewFriends.map(f => f.id) });
+  const stopAll = () => setProfile({ ...profile, locationSharedWith: [] });
+  return (
+    <div className="absolute inset-0 bg-black/80 z-50 flex items-end" onClick={onClose}>
+      <div className="bg-zinc-950 rounded-t-3xl w-full p-5 border-t-4 border-pink-500 max-h-[85%] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-2">
+          <h2 className="font-black text-xl uppercase flex items-center gap-2"><LocateFixed size={18} className="text-pink-500" />Share live location</h2>
+          <button onClick={onClose}><X size={20} /></button>
+        </div>
+        <p className="text-xs text-zinc-400 mb-4">Pick which crew members can see your live location during a ride. You can turn it off any time.</p>
+        {crewFriends.length === 0 ? (
+          <div className="bg-zinc-900 rounded-xl p-6 text-center border-2 border-zinc-800">
+            <Users size={32} className="mx-auto text-zinc-600 mb-2" />
+            <p className="text-sm font-black uppercase">No crew yet</p>
+            <p className="text-xs text-zinc-400 mt-1">Add friends from the Crew button in the header, then come back here to pick who sees your location.</p>
+          </div>
+        ) : (
+          <>
+            <div className="flex gap-2 mb-3">
+              <button onClick={shareAll} className="flex-1 bg-pink-500 text-white text-[10px] font-black px-3 py-2 rounded-full uppercase border-2 border-white active:scale-95">Share with all</button>
+              <button onClick={stopAll} disabled={shared.length === 0} className="flex-1 bg-zinc-800 text-white text-[10px] font-black px-3 py-2 rounded-full uppercase border-2 border-zinc-700 disabled:opacity-40 active:scale-95">Stop sharing</button>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-2">
+              {crewFriends.map(f => {
+                const on = shared.includes(f.id);
+                return (
+                  <button key={f.id} onClick={() => toggle(f.id)} className={`w-full rounded-xl p-3 flex items-center gap-3 border-2 text-left transition ${on ? 'bg-pink-500/15 border-pink-500' : 'bg-zinc-900 border-zinc-800'}`}>
+                    <div className={`${f.avatar || 'bg-pink-500'} w-10 h-10 rounded-full flex items-center justify-center font-black border-2 border-white`}>
+                      {(f.name || '?').charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-black text-sm truncate">{f.name}</p>
+                      <p className="text-[10px] text-zinc-400 truncate">{on ? 'Sharing location' : 'Not sharing'}</p>
+                    </div>
+                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center ${on ? 'bg-pink-500 border-white' : 'bg-zinc-900 border-zinc-600'}`}>
+                      {on && <Check size={14} />}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+        <button onClick={onClose} className="mt-4 w-full py-3 rounded-xl font-black uppercase bg-zinc-800 text-white border-2 border-zinc-700">
+          Done
+        </button>
       </div>
     </div>
   );
@@ -1195,13 +1381,7 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
             </div>
           )}
           {step === 2 && (
-            <div>
-              <h2 className="text-4xl font-black mb-2 uppercase tracking-tight">Where<br />do you ride?</h2>
-              <p className="text-white/90 mb-6 font-semibold">We'll show you rides in your area.</p>
-              <input value={profile.city} onChange={e => setProfile({...profile, city: e.target.value})} placeholder="City, State"
-                className="w-full bg-white/20 backdrop-blur rounded-2xl px-5 py-4 text-lg outline-none border-4 border-white font-bold placeholder-white/60" />
-              <p className="text-white/80 text-xs mt-3 font-semibold">🧭 We'll ask for your location to show nearby rides</p>
-            </div>
+            <OnboardLocationStep profile={profile} setProfile={setProfile} />
           )}
           {step === 3 && (
             <div>
@@ -1247,6 +1427,44 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function OnboardLocationStep({ profile, setProfile }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const useMyLocation = () => {
+    if (!navigator.geolocation) { setMsg('Location not supported on this device'); return; }
+    setBusy(true); setMsg('');
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      const city = await reverseGeocode(coords.lat, coords.lng);
+      setProfile({ ...profile, coords, city: city || profile.city });
+      setBusy(false);
+      setMsg(city ? `Got it — ${city}` : 'Location saved');
+    }, () => {
+      setBusy(false);
+      setMsg('Permission denied — type your city below');
+    }, { enableHighAccuracy: true, timeout: 8000 });
+  };
+  return (
+    <div>
+      <h2 className="text-4xl font-black mb-2 uppercase tracking-tight">Where<br />do you ride?</h2>
+      <p className="text-white/90 mb-6 font-semibold">We'll show you rides in your area.</p>
+      <button
+        type="button"
+        onClick={useMyLocation}
+        disabled={busy}
+        className="w-full bg-white text-pink-600 font-black py-3 rounded-2xl flex items-center justify-center gap-2 border-4 border-blue-500 uppercase tracking-wide text-sm mb-3 shadow-xl disabled:opacity-60">
+        <LocateFixed size={18} />
+        {busy ? 'Finding you…' : 'Use my current location'}
+      </button>
+      <input value={profile.city} onChange={e => setProfile({...profile, city: e.target.value})} placeholder="Or type your city, state"
+        className="w-full bg-white/20 backdrop-blur rounded-2xl px-5 py-4 text-lg outline-none border-4 border-white font-bold placeholder-white/60" />
+      {msg
+        ? <p className="text-white text-xs mt-3 font-black">{msg}</p>
+        : <p className="text-white/80 text-xs mt-3 font-semibold">🧭 We'll ask for your location to show nearby rides</p>}
     </div>
   );
 }
@@ -1386,22 +1604,31 @@ function coordsToLatLng(coords, center) {
   return [lat, lng];
 }
 
-function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventClick, showRoutes, location }) {
+function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventClick, showRoutes, location, profileCoords }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const tileLayerRef = useRef(null);
   const markerLayerRef = useRef(null);
-  const [center, setCenter] = useState([28.0222, -81.7328]); // Winter Haven, FL default
+  const [center, setCenter] = useState(
+    profileCoords ? [profileCoords.lat, profileCoords.lng] : [28.0222, -81.7328]
+  );
   const [ready, setReady] = useState(false);
 
-  // Try geolocation once on mount
+  // Keep map centered on the saved profile coords if they exist
   useEffect(() => {
+    if (profileCoords) setCenter([profileCoords.lat, profileCoords.lng]);
+  }, [profileCoords]);
+
+  // If we don't have saved coords, try geolocation once on mount
+  useEffect(() => {
+    if (profileCoords) return; // saved coords win
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition(
       (pos) => setCenter([pos.coords.latitude, pos.coords.longitude]),
       () => { /* silent fallback to default */ },
       { timeout: 5000, maximumAge: 300000 }
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Initialize Leaflet map once
