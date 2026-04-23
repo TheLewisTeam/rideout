@@ -9,6 +9,15 @@ import {
   ackPage,
   fetchLatestUnackedPage,
   subscribePages,
+  createRideout,
+  fetchRideouts,
+  subscribeRideouts,
+  joinRideout,
+  leaveRideout,
+  deleteRideout,
+  fetchChatMessages,
+  sendChatMessage,
+  subscribeChat,
 } from './lib/supabase';
 
 // Random 6-char rider code for guardian linking (no confusing chars)
@@ -306,6 +315,19 @@ export default function RideoutApp() {
   const [events, setEvents] = useLocalState('rideout_events', []);
   const [feedPosts, setFeedPosts] = useLocalState('rideout_feedPosts', []);
   const [showShareLocation, setShowShareLocation] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+
+  // SHARED CALENDAR — load rideouts from Supabase and keep them live across devices.
+  useEffect(() => {
+    if (!supabaseReady) return;
+    let cancelled = false;
+    fetchRideouts().then((rows) => { if (!cancelled) setEvents(rows); });
+    const unsub = subscribeRideouts(() => {
+      fetchRideouts().then((rows) => { if (!cancelled) setEvents(rows); });
+    });
+    return () => { cancelled = true; unsub(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const rideIcons = { bike: Bike, ebike: Bike, skates: Zap, scooter: Navigation, escooter: Navigation, other: Bike };
   const rideColors = { bike: 'bg-pink-500', ebike: 'bg-amber-400', skates: 'bg-blue-500', scooter: 'bg-cyan-400', escooter: 'bg-lime-400', other: 'bg-fuchsia-500' };
@@ -322,12 +344,15 @@ export default function RideoutApp() {
   const joinedCrewIds = crews.filter(c => c.isJoined).map(c => c.id);
 
   const toggleJoin = (eventId) => {
-    if (joinedEvents.includes(eventId)) {
+    const isJoined = joinedEvents.includes(eventId);
+    if (isJoined) {
       setJoinedEvents(joinedEvents.filter(id => id !== eventId));
-      setEvents(events.map(e => e.id === eventId ? {...e, attendees: e.attendees - 1} : e));
+      setEvents(events.map(e => e.id === eventId ? {...e, attendees: Math.max(0, (e.attendees || 1) - 1)} : e));
+      if (supabaseReady) leaveRideout({ rideoutId: eventId, riderCode: profile.riderCode });
     } else {
       setJoinedEvents([...joinedEvents, eventId]);
-      setEvents(events.map(e => e.id === eventId ? {...e, attendees: e.attendees + 1} : e));
+      setEvents(events.map(e => e.id === eventId ? {...e, attendees: (e.attendees || 0) + 1} : e));
+      if (supabaseReady) joinRideout({ rideoutId: eventId, riderCode: profile.riderCode, riderName: profile.name });
     }
   };
 
@@ -409,6 +434,9 @@ export default function RideoutApp() {
                 title="Switch to guardian mode"
                 className="h-10 px-3 rounded-full bg-amber-400 text-black flex items-center gap-1.5 border-2 border-white font-black text-[10px] uppercase tracking-wide active:scale-95">
                 <ShieldCheck size={14} />Guardian
+              </button>
+              <button onClick={() => setShowChat(true)} title="Open chat room" className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white relative">
+                <MessageCircle size={18} />
               </button>
               <button onClick={openShareApp} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white">
                 <QrCode size={18} />
@@ -540,14 +568,40 @@ export default function RideoutApp() {
           profileName={profile.name} crews={crews.filter(c => c.isJoined)}
           onClose={() => setShowCreateEvent(false)}
           showRouteBuilder={showRouteBuilder} setShowRouteBuilder={setShowRouteBuilder} mapView={mapView}
-          onCreate={(newEvent) => {
-            const newId = events.length + 1;
-            setEvents([...events, {...newEvent, id: newId, hostId: 1, hostVerified: profile.verified, comments: [], coords: newEvent.route[0] || { x: 50, y: 50 }}]);
+          onCreate={async (newEvent) => {
+            const coords = newEvent.route && newEvent.route[0]
+              ? { lat: newEvent.route[0].lat || newEvent.route[0].y, lng: newEvent.route[0].lng || newEvent.route[0].x }
+              : profile.coords || null;
+            const payload = {
+              ...newEvent,
+              host: profile.name || 'Rider',
+              hostCode: profile.riderCode || null,
+              coords,
+            };
+            if (supabaseReady) {
+              const res = await createRideout(payload);
+              if (res && res.data) {
+                setEvents((prev) => {
+                  if (prev.find((e) => e.id === res.data.id)) return prev;
+                  return [...prev, res.data];
+                });
+                setJoinedEvents([...joinedEvents, res.data.id]);
+                if (res.data.hostCode) {
+                  joinRideout({ rideoutId: res.data.id, riderCode: res.data.hostCode, riderName: res.data.host });
+                }
+                setShowCreateEvent(false);
+                return;
+              }
+            }
+            // Offline fallback: keep the old local-only behavior so the UI still works.
+            const newId = `local-${Date.now()}`;
+            setEvents([...events, { ...payload, id: newId, hostId: 1, hostVerified: profile.verified, comments: [], attendees: 1 }]);
             setJoinedEvents([...joinedEvents, newId]);
             setShowCreateEvent(false);
           }}
         />
       )}
+      {showChat && <ChatRoom profile={profile} onClose={() => setShowChat(false)} />}
 
       <div className="flex-none bg-zinc-950 border-t-2 border-pink-500/30 px-2 pt-2 flex items-center justify-around" style={{paddingBottom: 'max(env(safe-area-inset-bottom), 0.5rem)'}}>
         {[
@@ -2466,8 +2520,8 @@ function GuardianHome({ profile, setProfile, onSwitchRole }) {
                 className="h-9 px-3 rounded-full bg-pink-500 text-white flex items-center gap-1.5 border-2 border-white font-black text-[10px] uppercase tracking-wide active:scale-95">
                 <Bike size={14} />Rider
               </button>
-              <button onClick={() => setShowLink(true)} className="h-9 w-9 rounded-full bg-white/20 backdrop-blur border-2 border-white flex items-center justify-center active:scale-95" title="Link a rider">
-                <UserPlus size={16} />
+              <button onClick={() => setShowLink(true)} className="h-9 px-3 rounded-full bg-white text-amber-600 border-2 border-white flex items-center gap-1.5 font-black text-[10px] uppercase tracking-wide active:scale-95 shadow" title="Link a rider by code">
+                <UserPlus size={14} />Link
               </button>
             </div>
           </div>
@@ -2481,10 +2535,15 @@ function GuardianHome({ profile, setProfile, onSwitchRole }) {
       {/* BOTTOM PANEL */}
       <div className="flex-1 overflow-y-auto p-4 bg-zinc-950">
         {linkedRiders.length === 0 ? (
-          <div className="bg-zinc-900 rounded-2xl p-6 text-center border-2 border-zinc-800">
-            <Users size={32} className="mx-auto text-zinc-600 mb-2" />
-            <p className="text-sm font-black uppercase">No riders linked yet</p>
-            <p className="text-xs text-zinc-400 mt-1">Tap the <span className="text-amber-400 font-black">+ person</span> button above. You'll need the rider's 6-char code from their Profile → Guardians & Pager.</p>
+          <div className="bg-gradient-to-br from-amber-500 to-pink-500 rounded-2xl p-6 text-center border-4 border-white shadow-xl">
+            <ShieldCheck size={40} className="mx-auto text-white mb-2" />
+            <p className="text-base font-black uppercase text-white" style={{textShadow: '1px 1px 0 rgba(0,0,0,0.2)'}}>No riders linked yet</p>
+            <p className="text-xs text-white/90 mt-1 mb-4 px-2">Ask your rider to open <span className="font-black">Profile → Guardians & Pager</span> on their phone and read you the 6-character code.</p>
+            <button
+              onClick={() => setShowLink(true)}
+              className="w-full bg-white text-amber-600 font-black py-4 rounded-xl flex items-center justify-center gap-2 text-base uppercase tracking-wide border-4 border-blue-500 shadow-lg active:scale-95">
+              <UserPlus size={20} />Enter rider code
+            </button>
           </div>
         ) : selected && selected.rider ? (
           <GuardianRiderCard
@@ -2701,6 +2760,125 @@ function LinkRiderModal({ onClose, onLink }) {
             Link rider
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== CHAT ROOM (shared across all devices via Supabase) =====
+function ChatRoom({ profile, onClose }) {
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef(null);
+  const room = 'global';
+
+  // Initial load + realtime subscription.
+  useEffect(() => {
+    let cancelled = false;
+    fetchChatMessages(room).then((rows) => {
+      if (cancelled) return;
+      setMessages(rows);
+      // scroll to bottom after first render
+      setTimeout(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }, 50);
+    });
+    const unsub = subscribeChat(room, (m) => {
+      setMessages((prev) => {
+        if (prev.find((x) => x.id === m.id)) return prev;
+        return [...prev, m];
+      });
+      setTimeout(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }, 50);
+    });
+    return () => { cancelled = true; unsub(); };
+  }, []);
+
+  const send = async () => {
+    const body = draft.trim();
+    if (!body || sending) return;
+    setSending(true);
+    const res = await sendChatMessage({
+      room,
+      authorName: profile.name || 'Rider',
+      authorCode: profile.riderCode || null,
+      avatar: profile.avatar || null,
+      body,
+    });
+    setSending(false);
+    if (res && res.data) setDraft('');
+  };
+
+  const onKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  };
+
+  const myCode = profile.riderCode;
+
+  return (
+    <div className="absolute inset-0 z-50 bg-zinc-950 flex flex-col" style={{WebkitTapHighlightColor: 'transparent'}}>
+      <div className="flex-none bg-gradient-to-r from-pink-500 via-pink-600 to-blue-500 px-4 pb-3" style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)'}}>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-black uppercase tracking-tight flex items-center gap-2" style={{textShadow: '2px 2px 0 rgba(0,0,0,0.2)'}}>
+              <MessageCircle size={20} />Rideout Chat
+            </h1>
+            <p className="text-[11px] text-white/90 font-semibold tracking-wide">Plan the next rideout — visible to everyone</p>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-full bg-white/20 backdrop-blur border-2 border-white flex items-center justify-center active:scale-95">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+      <CheckeredStrip color1="#3b82f6" color2="#ffffff" />
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-4 space-y-2">
+        {messages.length === 0 && (
+          <div className="text-center text-zinc-500 text-sm mt-10">
+            No messages yet. Be the first — where should the next rideout happen?
+          </div>
+        )}
+        {messages.map((m) => {
+          const mine = m.author_code && myCode && m.author_code === myCode;
+          const t = m.sent_at ? new Date(m.sent_at) : new Date();
+          const timeLabel = t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          return (
+            <div key={m.id} className={`flex gap-2 ${mine ? 'justify-end' : 'justify-start'}`}>
+              {!mine && (
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-pink-500 to-blue-500 flex-none flex items-center justify-center border-2 border-zinc-800 overflow-hidden">
+                  {m.avatar
+                    ? <img src={m.avatar} alt="" className="w-full h-full object-cover" />
+                    : <User size={14} />}
+                </div>
+              )}
+              <div className={`max-w-[75%] rounded-2xl px-3 py-2 ${mine ? 'bg-pink-500 text-white rounded-br-sm' : 'bg-zinc-900 text-white rounded-bl-sm border border-zinc-800'}`}>
+                {!mine && (
+                  <p className="text-[10px] font-black uppercase text-pink-400 tracking-wide mb-0.5">{m.author_name || 'Rider'}</p>
+                )}
+                <p className="text-sm whitespace-pre-wrap break-words">{m.body}</p>
+                <p className={`text-[9px] mt-1 ${mine ? 'text-white/70' : 'text-zinc-500'}`}>{timeLabel}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex-none bg-zinc-900 border-t-2 border-zinc-800 p-3 flex items-center gap-2" style={{paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)'}}>
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKey}
+          placeholder="Type a message..."
+          className="flex-1 bg-zinc-950 border-2 border-zinc-800 focus:border-pink-500 rounded-full px-4 py-2.5 text-sm outline-none"
+        />
+        <button
+          onClick={send}
+          disabled={!draft.trim() || sending}
+          className="w-11 h-11 rounded-full bg-pink-500 text-white border-2 border-white flex items-center justify-center active:scale-95 disabled:opacity-40">
+          <Send size={16} />
+        </button>
       </div>
     </div>
   );

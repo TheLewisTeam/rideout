@@ -46,15 +46,63 @@ create index if not exists links_rider_code_idx
 create unique index if not exists links_rider_guardian_unique
   on public.links (rider_code, guardian_phone);
 
+-- Rideouts: the shared calendar — every device sees the same events.
+create table if not exists public.rideouts (
+  id                 uuid primary key default gen_random_uuid(),
+  title              text not null,
+  types              text[] default '{}',
+  date               date not null,
+  time               text,
+  location           text,
+  coords_lat         double precision,
+  coords_lng         double precision,
+  host_name          text,
+  host_code          text,
+  level              text,
+  description        text,
+  beginner_friendly  boolean default false,
+  created_at         timestamptz default now()
+);
+create index if not exists rideouts_date_idx on public.rideouts (date);
+
+-- Rideout joins: who's RSVPing to what. Unique per (rideout, rider).
+create table if not exists public.rideout_joins (
+  id          uuid primary key default gen_random_uuid(),
+  rideout_id  uuid not null references public.rideouts(id) on delete cascade,
+  rider_code  text,
+  rider_name  text,
+  joined_at   timestamptz default now()
+);
+create unique index if not exists rideout_joins_unique
+  on public.rideout_joins (rideout_id, rider_code);
+create index if not exists rideout_joins_rideout_idx
+  on public.rideout_joins (rideout_id);
+
+-- Chat messages. `room` is either 'global' or a rideout UUID as text.
+create table if not exists public.chat_messages (
+  id           uuid primary key default gen_random_uuid(),
+  room         text not null default 'global',
+  author_name  text,
+  author_code  text,
+  avatar       text,
+  body         text not null,
+  sent_at      timestamptz default now()
+);
+create index if not exists chat_messages_room_sent_at_idx
+  on public.chat_messages (room, sent_at desc);
+
 -- ============================================================
 -- RLS — open policies (anon key can read/write).
 -- This is an open social-network style app with no auth yet.
 -- Tighten these once you add Supabase Auth.
 -- ============================================================
 
-alter table public.riders enable row level security;
-alter table public.pages  enable row level security;
-alter table public.links  enable row level security;
+alter table public.riders         enable row level security;
+alter table public.pages          enable row level security;
+alter table public.links          enable row level security;
+alter table public.rideouts       enable row level security;
+alter table public.rideout_joins  enable row level security;
+alter table public.chat_messages  enable row level security;
 
 drop policy if exists "anon all riders" on public.riders;
 create policy "anon all riders"
@@ -68,13 +116,44 @@ drop policy if exists "anon all links" on public.links;
 create policy "anon all links"
   on public.links for all using (true) with check (true);
 
+drop policy if exists "anon all rideouts" on public.rideouts;
+create policy "anon all rideouts"
+  on public.rideouts for all using (true) with check (true);
+
+drop policy if exists "anon all joins" on public.rideout_joins;
+create policy "anon all joins"
+  on public.rideout_joins for all using (true) with check (true);
+
+drop policy if exists "anon all chat" on public.chat_messages;
+create policy "anon all chat"
+  on public.chat_messages for all using (true) with check (true);
+
 -- ============================================================
 -- Realtime — stream row changes to subscribed clients.
+-- Safe to re-run: ignores "already member of publication" errors.
 -- ============================================================
 
-alter publication supabase_realtime add table public.riders;
-alter publication supabase_realtime add table public.pages;
-alter publication supabase_realtime add table public.links;
+do $$
+begin
+  begin alter publication supabase_realtime add table public.riders;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.pages;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.links;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.rideouts;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.rideout_joins;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.chat_messages;
+  exception when duplicate_object then null;
+  end;
+end $$;
 
 -- ============================================================
 -- updated_at trigger for riders
