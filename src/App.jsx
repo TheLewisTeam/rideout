@@ -1427,14 +1427,14 @@ function CrewDetailModal({ crew, events, viewerCode, onClose, onJoin, onLeave, o
   // Owner = whoever's rider code is stamped on the crew. Older crews created
   // before we tracked ownership won't have one — in that case, allow edit for
   // anyone who is a member, as a sensible fallback.
-  const isOwner = (crew.ownerCode && viewerCode && crew.ownerCode === viewerCode) || (!crew.ownerCode && crew.isJoined);
+  const canEdit = (crew.ownerCode && viewerCode && crew.ownerCode === viewerCode) || (!crew.ownerCode && crew.isJoined);
   return (
     <div className="absolute inset-0 bg-zinc-950 z-50 flex flex-col overflow-hidden">
       <div className={`${crew.color} px-4 pb-4`} style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)'}}>
         <div className="flex items-center justify-between mb-3">
           <button onClick={onClose}><ArrowLeft size={22} /></button>
           <div className="flex items-center gap-2">
-            {isOwner && (
+            {canEdit && (
               <button onClick={onEdit} className="bg-white/20 backdrop-blur border-2 border-white rounded-full px-3 py-1.5 flex items-center gap-1.5 text-xs font-black uppercase">
                 <Pencil size={14} />Edit
               </button>
