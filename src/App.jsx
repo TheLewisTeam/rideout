@@ -1,5 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy, Upload, LocateFixed, RefreshCw } from 'lucide-react';
+import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy, Upload, LocateFixed, RefreshCw, Radio, Bell, BellRing, Eye } from 'lucide-react';
+
+// Random 6-char rider code for guardian linking (no confusing chars)
+function generateRiderCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+// Send a page from a guardian to a rider (writes to localStorage; storage event
+// fires in the rider's tab/device if same-origin). Returns the message object.
+function sendPage(riderCode, fromName, fromPhone, msg) {
+  const data = {
+    at: Date.now(),
+    from: fromName || 'Your guardian',
+    phone: fromPhone || '',
+    msg: msg || 'Check in with me.'
+  };
+  try { localStorage.setItem(`rideout_page_${riderCode}`, JSON.stringify(data)); } catch (e) {}
+  return data;
+}
 
 // Tiny persistence wrapper. Same API as useState, but reads/writes localStorage.
 function useLocalState(key, defaultValue) {
@@ -82,8 +103,67 @@ export default function RideoutApp() {
     trustedContact: null, shareLocation: false,
     avatar: null,            // base64 data URL
     coords: null,            // { lat, lng } once granted
-    locationSharedWith: []   // friend ids
+    locationSharedWith: [],  // friend ids
+    role: null,              // 'rider' | 'guardian'
+    riderCode: '',           // riders: their own code; guardians ignore
+    phone: '',               // guardians: their callback number
+    guardians: [],           // riders: [{ name, phone }]
+    linkedRiders: []         // guardians: [{ code, name }]
   });
+  const [pendingPage, setPendingPage] = useState(null);
+
+  // Ensure a rider always has a code
+  useEffect(() => {
+    if (profile.role === 'rider' && !profile.riderCode) {
+      setProfile({ ...profile, riderCode: generateRiderCode() });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.role]);
+
+  // Rider listens for incoming pages (localStorage across tabs/devices-same-origin)
+  useEffect(() => {
+    if (profile.role !== 'rider' || !profile.riderCode) return;
+    const key = `rideout_page_${profile.riderCode}`;
+    const readAndMaybeShow = (raw) => {
+      if (!raw) return;
+      try {
+        const data = JSON.parse(raw);
+        if (!data || data.ack) return;
+        if (Date.now() - data.at > 24 * 60 * 60 * 1000) return; // ignore stale pages
+        setPendingPage(data);
+      } catch (e) { /* ignore */ }
+    };
+    try { readAndMaybeShow(localStorage.getItem(key)); } catch (e) {}
+    const handler = (e) => { if (e.key === key) readAndMaybeShow(e.newValue); };
+    window.addEventListener('storage', handler);
+    return () => window.removeEventListener('storage', handler);
+  }, [profile.role, profile.riderCode]);
+
+  const dismissPage = () => {
+    try {
+      if (profile.riderCode) {
+        const key = `rideout_page_${profile.riderCode}`;
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          const data = JSON.parse(raw);
+          localStorage.setItem(key, JSON.stringify({ ...data, ack: true }));
+        }
+      }
+    } catch (e) {}
+    setPendingPage(null);
+  };
+
+  const testPageSelf = () => {
+    // Lets the rider preview what a page looks like without another device.
+    if (!profile.riderCode) return;
+    sendPage(profile.riderCode, 'Demo Guardian', '(555) 000-1234', 'This is a test page.');
+    setPendingPage({
+      at: Date.now(),
+      from: 'Demo Guardian',
+      phone: '(555) 000-1234',
+      msg: 'This is a test page.'
+    });
+  };
   const [showDemoTour, setShowDemoTour] = useState(false);
   const [activeTab, setActiveTab] = useState('discover');
   const [discoverSegment, setDiscoverSegment] = useState('rides'); // rides | calendar
@@ -188,6 +268,25 @@ export default function RideoutApp() {
     return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   };
 
+  // Role picker (first-run). Existing onboarded users without role default to rider.
+  if (!profile.role) {
+    if (onboarded) {
+      // Backfill existing users (from before guardian mode existed)
+      setProfile({ ...profile, role: 'rider' });
+      return null;
+    }
+    return <RoleSelect onPick={(role) => setProfile({ ...profile, role })} />;
+  }
+
+  // Guardian branch: separate onboarding + home screen, no rider feed/crews/etc.
+  if (profile.role === 'guardian') {
+    if (!profile.name || !profile.phone) {
+      return <GuardianOnboarding profile={profile} setProfile={setProfile} onSwitchRole={() => setProfile({ ...profile, role: null })} />;
+    }
+    return <GuardianHome profile={profile} setProfile={setProfile} onSwitchRole={() => setProfile({ ...profile, role: null, name: '', phone: '' })} />;
+  }
+
+  // Rider branch continues below with the existing onboarding flow.
   if (!onboarded) {
     return <Onboarding profile={profile} setProfile={setProfile} step={onboardStep} setStep={setOnboardStep} onComplete={() => {
       setOnboarded(true);
@@ -231,6 +330,7 @@ export default function RideoutApp() {
         setShowDemoTour(false);
         try { localStorage.setItem('rideoutDemoSeen', '1'); } catch (e) {}
       }} />}
+      {pendingPage && <PagerOverlay page={pendingPage} onDismiss={dismissPage} />}
 
       {/* Active ride banner with SOS */}
       {activeRideToday && (
@@ -287,6 +387,7 @@ export default function RideoutApp() {
             onOpenTrustedContact={() => setShowTrustedContact(true)}
             onOpenSOS={() => setShowSOS(true)}
             onOpenShareLocation={() => setShowShareLocation(true)}
+            onTestPager={testPageSelf}
             setActiveTab={setActiveTab} setSelectedCrew={setSelectedCrew}
           />
         )}
@@ -835,7 +936,7 @@ function FeedPostCard({ post, onLike, rideColors, rideIcons }) {
 }
 
 // ===== PROFILE =====
-function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCrewIds, events, crews, friends, rideIcons, rideColors, rideLabels, formatDate, onEventClick, onOpenFriends, onOpenTrustedContact, onOpenSOS, onOpenShareLocation, setActiveTab, setSelectedCrew }) {
+function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCrewIds, events, crews, friends, rideIcons, rideColors, rideLabels, formatDate, onEventClick, onOpenFriends, onOpenTrustedContact, onOpenSOS, onOpenShareLocation, onTestPager, setActiveTab, setSelectedCrew }) {
   const fileRef = useRef(null);
   const [locBusy, setLocBusy] = useState(false);
   const [locMsg, setLocMsg] = useState('');
@@ -972,6 +1073,56 @@ function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCre
             <ChevronRight size={16} className="text-zinc-500" />
           </button>
         </div>
+      </div>
+      {/* GUARDIANS / PAGER */}
+      <div className="mt-4 bg-zinc-900 rounded-2xl p-4 border-2 border-zinc-800">
+        <h3 className="text-xs text-zinc-400 font-black uppercase mb-3 tracking-wider flex items-center gap-2">
+          <Radio size={14} className="text-amber-400" />Guardians & Pager
+        </h3>
+        <div className="bg-gradient-to-br from-amber-500 to-pink-500 rounded-xl p-4 border-2 border-white mb-3">
+          <p className="text-[10px] font-black uppercase text-white/80 tracking-widest">Your rider code</p>
+          <div className="flex items-center justify-between mt-1">
+            <p className="font-mono font-black text-3xl text-white tracking-[0.3em]">{profile.riderCode || '------'}</p>
+            <button
+              onClick={() => {
+                try { navigator.clipboard && navigator.clipboard.writeText(profile.riderCode || ''); } catch (e) {}
+              }}
+              className="bg-white/20 backdrop-blur rounded-full px-3 py-1.5 text-[10px] font-black uppercase border-2 border-white active:scale-95">
+              <Copy size={12} className="inline mr-1" />Copy
+            </button>
+          </div>
+          <p className="text-[10px] text-white/90 mt-2 font-semibold">Share this code with a parent, spouse, or ride buddy so they can page you from the Guardian app.</p>
+        </div>
+        {(profile.guardians || []).length > 0 && (
+          <div className="space-y-2 mb-3">
+            {profile.guardians.map((g, i) => (
+              <div key={i} className="bg-zinc-800 rounded-xl p-3 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-amber-500 flex items-center justify-center border-2 border-white">
+                  <ShieldCheck size={16} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-black truncate">{g.name}</p>
+                  <p className="text-[10px] text-zinc-400 truncate">{g.phone || 'No phone on file'}</p>
+                </div>
+                <button
+                  onClick={() => setProfile({ ...profile, guardians: profile.guardians.filter((_, j) => j !== i) })}
+                  className="text-zinc-500 active:scale-95" aria-label="Remove guardian">
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button onClick={onTestPager} className="w-full bg-zinc-800 rounded-xl p-3 flex items-center gap-3 text-left border-2 border-dashed border-amber-500/40">
+          <div className="w-10 h-10 rounded-lg bg-amber-500 flex items-center justify-center">
+            <BellRing size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-black">Test pager</p>
+            <p className="text-[10px] text-zinc-400">Preview what a page looks, sounds, and feels like</p>
+          </div>
+          <ChevronRight size={16} className="text-zinc-500" />
+        </button>
       </div>
       <button onClick={onOpenFriends} className="w-full mt-4 bg-zinc-900 rounded-xl p-3 flex items-center justify-between border-2 border-zinc-800">
         <span className="flex items-center gap-2 font-black text-sm uppercase">
@@ -2002,6 +2153,323 @@ function RouteBuilder({ initialRoute, mapView, onDone, onCancel }) {
         <button onClick={() => setRoute([])} disabled={route.length === 0} className="flex-1 py-3 rounded-xl font-black uppercase bg-zinc-900 border-2 border-zinc-800 disabled:opacity-40 flex items-center justify-center gap-2">
           <Trash2 size={16} />Clear
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ===== ROLE SELECT =====
+function RoleSelect({ onPick }) {
+  return (
+    <div className="w-full max-w-md mx-auto bg-gradient-to-br from-pink-500 via-pink-600 to-blue-600 text-white relative overflow-hidden flex flex-col" style={{height: '100dvh', WebkitTapHighlightColor: 'transparent', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)'}}>
+      <div className="absolute left-0 right-0 h-3" style={{...checkeredStyle('#3b82f6', '#ffffff', 14), top: 'env(safe-area-inset-top)'}} />
+      <div className="absolute left-0 right-0 h-3" style={{...checkeredStyle('#ec4899', '#ffffff', 14), bottom: 'env(safe-area-inset-bottom)'}} />
+      <div className="p-6 pt-9 pb-9 flex flex-col flex-1">
+        <div className="flex-1 flex flex-col justify-center">
+          <div className="w-24 h-24 bg-white rounded-3xl mx-auto flex items-center justify-center mb-6 border-4 border-blue-500 shadow-2xl">
+            <Bike size={48} className="text-pink-500" />
+          </div>
+          <h1 className="text-5xl font-black mb-3 tracking-tighter text-center" style={{textShadow: '3px 3px 0 rgba(0,0,0,0.15)'}}>RIDEOUT</h1>
+          <p className="text-white text-base mb-8 font-black uppercase tracking-wider text-center">Who's riding today?</p>
+          <button onClick={() => onPick('rider')}
+            className="w-full bg-white text-pink-600 font-black py-5 rounded-2xl flex items-center gap-3 text-lg border-4 border-blue-500 uppercase tracking-wide shadow-xl mb-3 active:scale-95">
+            <div className="w-12 h-12 rounded-xl bg-pink-500 text-white flex items-center justify-center"><Bike size={24} /></div>
+            <div className="flex-1 text-left">
+              <div className="text-xl">I'm a rider</div>
+              <div className="text-[10px] text-pink-400 font-bold normal-case tracking-normal">Find rides, join crews, ride safer</div>
+            </div>
+            <ArrowRight size={22} />
+          </button>
+          <button onClick={() => onPick('guardian')}
+            className="w-full bg-white text-amber-600 font-black py-5 rounded-2xl flex items-center gap-3 text-lg border-4 border-amber-400 uppercase tracking-wide shadow-xl active:scale-95">
+            <div className="w-12 h-12 rounded-xl bg-amber-500 text-white flex items-center justify-center"><ShieldCheck size={24} /></div>
+            <div className="flex-1 text-left">
+              <div className="text-xl">I'm a guardian</div>
+              <div className="text-[10px] text-amber-500 font-bold normal-case tracking-normal">Track my rider, page them when needed</div>
+            </div>
+            <ArrowRight size={22} />
+          </button>
+        </div>
+        <p className="text-center text-[10px] text-white/70 font-semibold uppercase tracking-widest">The Lewis Team</p>
+      </div>
+    </div>
+  );
+}
+
+// ===== GUARDIAN ONBOARDING =====
+function GuardianOnboarding({ profile, setProfile, onSwitchRole }) {
+  const [name, setName] = useState(profile.name || '');
+  const [phone, setPhone] = useState(profile.phone || '');
+  const canContinue = name.trim().length > 0 && phone.trim().length > 0;
+  return (
+    <div className="w-full max-w-md mx-auto bg-gradient-to-br from-amber-500 via-amber-600 to-pink-600 text-white relative overflow-hidden flex flex-col" style={{height: '100dvh', WebkitTapHighlightColor: 'transparent', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)'}}>
+      <div className="absolute left-0 right-0 h-3" style={{...checkeredStyle('#3b82f6', '#ffffff', 14), top: 'env(safe-area-inset-top)'}} />
+      <div className="absolute left-0 right-0 h-3" style={{...checkeredStyle('#ec4899', '#ffffff', 14), bottom: 'env(safe-area-inset-bottom)'}} />
+      <div className="p-6 pt-9 pb-9 flex flex-col flex-1 overflow-y-auto">
+        <button onClick={onSwitchRole} className="mb-4 text-white/90 flex items-center gap-1 text-sm font-bold self-start">
+          <ArrowLeft size={16} /> Not a guardian?
+        </button>
+        <div className="flex-1 flex flex-col justify-center">
+          <div className="w-20 h-20 bg-white rounded-2xl mx-auto flex items-center justify-center mb-5 border-4 border-amber-300 shadow-xl">
+            <ShieldCheck size={44} className="text-amber-500" />
+          </div>
+          <h1 className="text-4xl font-black uppercase tracking-tight text-center mb-2">Guardian login</h1>
+          <p className="text-white/90 mb-6 font-semibold text-center">Your rider will see your name & number when you page them.</p>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-black uppercase text-white/80">Your name</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Mom, Dad, Aunt Jen"
+                className="w-full bg-white/20 backdrop-blur rounded-xl px-4 py-3 mt-1 text-base outline-none border-4 border-white font-bold placeholder-white/60" />
+            </div>
+            <div>
+              <label className="text-xs font-black uppercase text-white/80">Your phone</label>
+              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="(555) 123-4567" inputMode="tel"
+                className="w-full bg-white/20 backdrop-blur rounded-xl px-4 py-3 mt-1 text-base outline-none border-4 border-white font-bold placeholder-white/60" />
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={() => setProfile({ ...profile, name: name.trim(), phone: phone.trim() })}
+          disabled={!canContinue}
+          className="w-full bg-white text-amber-600 font-black py-4 rounded-2xl flex items-center justify-center gap-2 text-lg disabled:opacity-50 border-4 border-blue-500 uppercase tracking-wide shadow-xl active:scale-95">
+          Continue <ArrowRight size={20} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ===== GUARDIAN HOME =====
+function GuardianHome({ profile, setProfile, onSwitchRole }) {
+  const [showLink, setShowLink] = useState(false);
+  const [lastPage, setLastPage] = useState({}); // riderCode -> timestamp
+  const linkedRiders = profile.linkedRiders || [];
+
+  const linkRider = (code, name) => {
+    const clean = (code || '').toUpperCase().trim();
+    if (!clean) return;
+    if (linkedRiders.find(r => r.code === clean)) { setShowLink(false); return; }
+    setProfile({ ...profile, linkedRiders: [...linkedRiders, { code: clean, name: name.trim() || clean }] });
+    setShowLink(false);
+  };
+
+  const unlink = (code) => setProfile({ ...profile, linkedRiders: linkedRiders.filter(r => r.code !== code) });
+
+  const pageRider = (rider) => {
+    sendPage(rider.code, profile.name, profile.phone, `${profile.name} is paging you. Please check in.`);
+    setLastPage({ ...lastPage, [rider.code]: Date.now() });
+  };
+
+  return (
+    <div className="w-full max-w-md mx-auto bg-zinc-950 text-white relative overflow-hidden flex flex-col" style={{height: '100dvh', WebkitTapHighlightColor: 'transparent'}}>
+      <div className="flex-none">
+        <div className="bg-gradient-to-r from-amber-500 via-amber-600 to-pink-500 px-4 pb-4" style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)'}}>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-black tracking-tight flex items-center gap-2" style={{textShadow: '2px 2px 0 rgba(0,0,0,0.2)'}}>
+                <ShieldCheck size={22} />GUARDIAN
+              </h1>
+              <p className="text-xs text-white/90 mt-0.5 font-semibold tracking-wide">{profile.name} · {profile.phone}</p>
+            </div>
+            <button onClick={onSwitchRole} className="text-[10px] font-black uppercase bg-white/20 border-2 border-white rounded-full px-3 py-2 active:scale-95">
+              Sign out
+            </button>
+          </div>
+        </div>
+        <CheckeredStrip color1="#3b82f6" color2="#ffffff" />
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="bg-amber-500/10 border-2 border-amber-500/40 rounded-2xl p-4 flex items-start gap-3">
+          <Bell size={20} className="text-amber-400 flex-none mt-0.5" />
+          <div className="flex-1 text-xs font-semibold text-amber-100">
+            Tap <span className="font-black">PAGE</span> to ring your rider's phone like a 90s pager. They'll see your name and number so they can call you back.
+          </div>
+        </div>
+        <h2 className="text-xs text-zinc-400 font-black uppercase mt-3 tracking-wider">Your riders</h2>
+        {linkedRiders.length === 0 ? (
+          <div className="bg-zinc-900 rounded-2xl p-6 text-center border-2 border-zinc-800">
+            <Users size={32} className="mx-auto text-zinc-600 mb-2" />
+            <p className="text-sm font-black uppercase">No riders linked yet</p>
+            <p className="text-xs text-zinc-400 mt-1">Ask your rider to open Rideout → Profile → Guardians & Pager and share their 6-char code with you.</p>
+          </div>
+        ) : linkedRiders.map(r => {
+          const recently = lastPage[r.code] && Date.now() - lastPage[r.code] < 60000;
+          return (
+            <div key={r.code} className="bg-zinc-900 rounded-2xl border-2 border-zinc-800 overflow-hidden">
+              <div className="p-4 flex items-center gap-3">
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-pink-500 to-blue-500 border-2 border-white flex items-center justify-center">
+                  <Bike size={20} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-black">{r.name}</p>
+                  <p className="text-[10px] text-zinc-400 font-mono tracking-widest">{r.code}</p>
+                </div>
+                <button onClick={() => unlink(r.code)} className="text-zinc-500 active:scale-95" aria-label="Unlink">
+                  <X size={16} />
+                </button>
+              </div>
+              <button onClick={() => pageRider(r)}
+                className={`w-full py-4 font-black uppercase tracking-widest text-lg flex items-center justify-center gap-2 border-t-2 border-black/20 ${recently ? 'bg-green-500 text-white' : 'bg-amber-500 text-black'} active:scale-[0.98] transition`}>
+                {recently ? <><Check size={20} />Paged</> : <><BellRing size={20} />Page {r.name}</>}
+              </button>
+            </div>
+          );
+        })}
+        <button onClick={() => setShowLink(true)}
+          className="w-full mt-2 bg-zinc-900 rounded-2xl p-4 flex items-center justify-center gap-2 border-2 border-dashed border-amber-500/50 text-amber-400 font-black uppercase text-sm active:scale-95">
+          <UserPlus size={18} />Link a rider
+        </button>
+      </div>
+      {showLink && <LinkRiderModal onClose={() => setShowLink(false)} onLink={linkRider} />}
+    </div>
+  );
+}
+
+// ===== LINK RIDER MODAL (guardian) =====
+function LinkRiderModal({ onClose, onLink }) {
+  const [code, setCode] = useState('');
+  const [name, setName] = useState('');
+  return (
+    <div className="absolute inset-0 bg-black/80 z-50 flex items-end" onClick={onClose}>
+      <div className="bg-zinc-950 rounded-t-3xl w-full p-5 border-t-4 border-amber-500" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-2">
+          <h2 className="font-black text-xl uppercase flex items-center gap-2"><UserPlus size={18} className="text-amber-400" />Link a rider</h2>
+          <button onClick={onClose}><X size={20} /></button>
+        </div>
+        <p className="text-xs text-zinc-400 mb-4">Enter the 6-character rider code from your rider's Profile → Guardians & Pager screen.</p>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-zinc-400 font-black uppercase">Rider code</label>
+            <input value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
+              placeholder="ABC123" maxLength={6}
+              className="w-full bg-zinc-900 rounded-xl px-4 py-3 mt-1 outline-none border-2 border-zinc-800 focus:border-amber-500 font-mono text-2xl tracking-[0.4em] text-center font-black" />
+          </div>
+          <div>
+            <label className="text-xs text-zinc-400 font-black uppercase">Rider's name (label)</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Jamie"
+              className="w-full bg-zinc-900 rounded-xl px-4 py-3 mt-1 text-sm outline-none border-2 border-zinc-800 focus:border-amber-500" />
+          </div>
+          <button onClick={() => onLink(code, name)} disabled={code.length !== 6}
+            className="w-full py-3 rounded-xl font-black uppercase bg-amber-500 text-black border-2 border-white disabled:opacity-40 mt-2 active:scale-95">
+            Link rider
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== PAGER OVERLAY (rider sees this when guardian pages) =====
+function PagerOverlay({ page, onDismiss }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Beep loop + vibrate
+  useEffect(() => {
+    let stopped = false;
+    let ctx = null;
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) { /* some browsers block before a user gesture */ }
+
+    const beep = (when, dur = 0.18) => {
+      if (!ctx || stopped) return;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = 2400;
+      gain.gain.setValueAtTime(0.0001, when);
+      gain.gain.exponentialRampToValueAtTime(0.25, when + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(when);
+      osc.stop(when + dur + 0.02);
+    };
+
+    const roundOfBeeps = () => {
+      if (!ctx || stopped) return;
+      const now = ctx.currentTime;
+      beep(now);
+      beep(now + 0.24);
+      beep(now + 0.48);
+    };
+
+    roundOfBeeps();
+    const interval = setInterval(roundOfBeeps, 1800);
+
+    let vibInt = null;
+    if (navigator.vibrate) {
+      navigator.vibrate([300, 120, 300, 120, 300]);
+      vibInt = setInterval(() => navigator.vibrate && navigator.vibrate([300, 120, 300]), 1800);
+    }
+
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+      if (vibInt) clearInterval(vibInt);
+      try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) {}
+      try { if (ctx) ctx.close(); } catch (e) {}
+    };
+  }, []);
+
+  const timeStr = new Date(page.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const callHref = page.phone ? `tel:${page.phone.replace(/[^0-9+]/g, '')}` : null;
+
+  return (
+    <div className="fixed inset-0 z-[200] bg-black flex items-center justify-center p-4" style={{fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'}}>
+      {/* Retro pager housing */}
+      <div className="w-full max-w-sm bg-zinc-800 rounded-3xl p-5 border-4 border-zinc-700 shadow-[0_20px_60px_rgba(0,0,0,0.8)]" style={{
+        backgroundImage: 'linear-gradient(180deg, #3f3f46 0%, #18181b 100%)'
+      }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-[10px] font-black uppercase tracking-widest text-zinc-400 flex items-center gap-1.5">
+            <span className="relative flex h-2.5 w-2.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span></span>
+            PAGER
+          </span>
+          <span className="text-[10px] font-black uppercase tracking-widest text-zinc-500">RIDEOUT</span>
+        </div>
+        {/* LCD screen */}
+        <div className="rounded-lg p-5 border-4 border-zinc-900 shadow-inner" style={{
+          backgroundColor: '#9cc068',
+          backgroundImage: 'repeating-linear-gradient(0deg, rgba(0,0,0,0.06) 0px, rgba(0,0,0,0.06) 1px, transparent 1px, transparent 3px)',
+          color: '#1b2b15'
+        }}>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[10px] font-black uppercase tracking-widest opacity-70">&gt; INCOMING PAGE</span>
+            <span className="text-[10px] font-black tabular-nums opacity-70">{timeStr}</span>
+          </div>
+          <p className="text-[11px] font-black uppercase tracking-wider opacity-80">FROM:</p>
+          <p className="text-2xl font-black uppercase leading-tight mb-3 break-words">{page.from}</p>
+          <p className="text-[11px] font-black uppercase tracking-wider opacity-80">CALLBACK:</p>
+          <p className="text-3xl font-black tabular-nums tracking-wider mb-3 break-all">{page.phone || '— — — —'}</p>
+          {page.msg && (
+            <>
+              <p className="text-[11px] font-black uppercase tracking-wider opacity-80">MESSAGE:</p>
+              <p className="text-sm font-bold leading-snug">{page.msg}</p>
+            </>
+          )}
+          <div className="mt-4 pt-3 border-t border-black/20 flex items-center justify-between text-[10px] font-black tabular-nums opacity-70">
+            <span>BEEPING · {String(Math.floor(elapsed/60)).padStart(2,'0')}:{String(elapsed%60).padStart(2,'0')}</span>
+            <span className="flex items-center gap-1"><Bell size={10} />ALERT</span>
+          </div>
+        </div>
+        {/* Buttons */}
+        <div className="flex gap-2 mt-4">
+          {callHref && (
+            <a href={callHref}
+              className="flex-1 bg-green-500 text-black font-black py-3 rounded-xl flex items-center justify-center gap-2 uppercase tracking-wide border-2 border-green-200 active:scale-95">
+              <Phone size={18} />Call back
+            </a>
+          )}
+          <button onClick={onDismiss}
+            className="flex-1 bg-zinc-700 text-white font-black py-3 rounded-xl flex items-center justify-center gap-2 uppercase tracking-wide border-2 border-zinc-600 active:scale-95">
+            <X size={18} />Dismiss
+          </button>
+        </div>
+        <p className="text-center text-[9px] text-zinc-500 mt-3 uppercase tracking-widest">Tap dismiss to silence the pager</p>
       </div>
     </div>
   );
