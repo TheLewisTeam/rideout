@@ -109,20 +109,57 @@ function fireAlarmBeep() {
   } catch (e) { /* ignore — audio is best-effort */ }
 }
 
+// Shared AudioContext — created lazily, then unlocked on first user gesture.
+// Mobile (iOS Safari especially) refuses to play audio created inside a network
+// callback unless the underlying context was already resumed during a tap/click.
+let _sharedAudioCtx = null;
+function getSharedAudioCtx() {
+  if (_sharedAudioCtx) return _sharedAudioCtx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  try { _sharedAudioCtx = new Ctx(); } catch (e) { return null; }
+  return _sharedAudioCtx;
+}
+// Call this once on app mount — it attaches a one-shot listener that resumes
+// the AudioContext the first time the user touches the screen. After that,
+// later audio triggered from network events (realtime chime) will play.
+function installAudioUnlock() {
+  const unlock = () => {
+    const ctx = getSharedAudioCtx();
+    if (ctx && ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+    // Play a silent buffer to satisfy Safari's autoplay policy.
+    try {
+      if (ctx) {
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+      }
+    } catch (e) { /* ignore */ }
+    window.removeEventListener('touchstart', unlock, true);
+    window.removeEventListener('mousedown', unlock, true);
+    window.removeEventListener('keydown', unlock, true);
+  };
+  window.addEventListener('touchstart', unlock, true);
+  window.addEventListener('mousedown', unlock, true);
+  window.addEventListener('keydown', unlock, true);
+}
+
 // Friendly 3-note ascending chime for "new rideout posted" — lighter and
 // more musical than the alarm beep so riders can tell them apart at a glance.
 function fireNewRideoutChime() {
   try {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return;
-    const ctx = new Ctx();
+    const ctx = getSharedAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
     const note = (at, freq, dur = 0.22) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
       osc.frequency.value = freq;
       gain.gain.setValueAtTime(0.0001, ctx.currentTime + at);
-      gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + at + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + dur);
       osc.connect(gain).connect(ctx.destination);
       osc.start(ctx.currentTime + at);
@@ -132,7 +169,6 @@ function fireNewRideoutChime() {
     note(0.00, 523.25);
     note(0.14, 659.25);
     note(0.28, 783.99, 0.35);
-    setTimeout(() => { try { ctx.close(); } catch (e) {} }, 1200);
   } catch (e) { /* ignore — audio is best-effort */ }
 }
 
@@ -237,6 +273,11 @@ export default function RideoutApp() {
     termsAccepted: false     // Lewis Team terms + good-faith acknowledgement
   });
   const [pendingPage, setPendingPage] = useState(null);
+
+  // Install the audio-unlock listener once at mount. The first touch/click
+  // in the app resumes the shared AudioContext, so later chimes triggered by
+  // realtime events (new rideout posted) can actually play on mobile.
+  useEffect(() => { installAudioUnlock(); }, []);
 
   // Migration: patch any missing fields on older saved profiles so
   // components that do .map/.filter on profile.rideTypes etc. don't crash.
@@ -2118,6 +2159,18 @@ function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCre
           <div className="flex-1 min-w-0">
             <p className="text-sm font-black">Test pager</p>
             <p className="text-[10px] text-zinc-400">Preview what a page looks, sounds, and feels like</p>
+          </div>
+          <ChevronRight size={16} className="text-zinc-500" />
+        </button>
+        <button
+          onClick={() => fireNewRideoutChime()}
+          className="w-full mt-2 bg-zinc-800 rounded-xl p-3 flex items-center gap-3 text-left border-2 border-dashed border-blue-500/40">
+          <div className="w-10 h-10 rounded-lg bg-blue-500 flex items-center justify-center">
+            <Bell size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-black">Test rideout chime</p>
+            <p className="text-[10px] text-zinc-400">Previews the sound you'll hear when someone posts a new rideout</p>
           </div>
           <ChevronRight size={16} className="text-zinc-500" />
         </button>
