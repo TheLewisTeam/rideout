@@ -435,8 +435,8 @@ export default function RideoutApp() {
                 className="h-10 px-3 rounded-full bg-amber-400 text-black flex items-center gap-1.5 border-2 border-white font-black text-[10px] uppercase tracking-wide active:scale-95">
                 <ShieldCheck size={14} />Guardian
               </button>
-              <button onClick={() => setShowChat(true)} title="Open chat room" className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white relative">
-                <MessageCircle size={18} />
+              <button onClick={() => setShowChat(true)} title="Open chat room" className="h-10 px-3 rounded-full bg-white text-pink-600 flex items-center gap-1.5 border-2 border-white font-black text-[10px] uppercase tracking-wide active:scale-95 shadow">
+                <MessageCircle size={14} />Chat
               </button>
               <button onClick={openShareApp} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white">
                 <QrCode size={18} />
@@ -576,6 +576,7 @@ export default function RideoutApp() {
               ...newEvent,
               host: profile.name || 'Rider',
               hostCode: profile.riderCode || null,
+              hostAvatar: profile.avatar || null,
               coords,
             };
             if (supabaseReady) {
@@ -591,6 +592,14 @@ export default function RideoutApp() {
                 }
                 setShowCreateEvent(false);
                 return;
+              }
+              if (res && res.error) {
+                // Surface the real reason instead of silently failing.
+                alert(
+                  'Could not save rideout to Supabase:\n\n' + res.error +
+                  '\n\nMost common cause: you haven\'t run the latest supabase-schema.sql yet. ' +
+                  'Open Supabase → SQL Editor → paste the file → Run. Saving locally for now.'
+                );
               }
             }
             // Offline fallback: keep the old local-only behavior so the UI still works.
@@ -736,33 +745,159 @@ function DiscoverScreen({ events, friendsEvents, friendIds, filterType, setFilte
       )}
 
       {segment === 'calendar' && (
-        <div className="p-4 pt-2 space-y-3">
-          {[...events].sort((a,b) => a.date.localeCompare(b.date)).map(event => {
-            const Icon = rideIcons[event.type];
-            const isJoined = joinedEvents.includes(event.id);
-            return (
-              <button key={event.id} onClick={() => onEventClick(event)} className="w-full text-left bg-zinc-900 rounded-2xl overflow-hidden border-2 border-zinc-800">
-                <div className={`${rideColors[event.type]} px-4 py-2 flex items-center justify-between`}>
-                  <span className="text-sm font-black uppercase">{formatDate(event.date)} · {event.time}</span>
-                  <Icon size={18} />
-                </div>
-                <CheckeredStrip color1="#3b82f6" color2="#ffffff" />
-                <div className="p-4">
-                  <h3 className="font-black flex items-center gap-1">{event.title}{event.hostVerified && <VerifiedBadge />}</h3>
-                  <p className="text-xs text-zinc-400 mt-1">{event.location} · {event.distance} · {event.pace}</p>
-                  <div className="flex items-center justify-between mt-3">
-                    <div className="flex items-center gap-3 text-xs text-zinc-300">
-                      <span className="flex items-center gap-1"><Users size={12} />{event.attendees}</span>
-                      {event.beginnerFriendly && <span className="bg-green-500/20 text-green-400 text-[10px] px-2 py-0.5 rounded-full font-black uppercase">Beginner OK</span>}
-                    </div>
-                    {isJoined && <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-pink-500 uppercase">Joined</span>}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        <CalendarGrid
+          events={events}
+          rideIcons={rideIcons}
+          rideColors={rideColors}
+          joinedEvents={joinedEvents}
+          onEventClick={onEventClick}
+          formatDate={formatDate}
+        />
       )}
+    </div>
+  );
+}
+
+// ===== CALENDAR GRID (month view, shows host avatars per day) =====
+function CalendarGrid({ events, rideIcons, rideColors, joinedEvents, onEventClick, formatDate }) {
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const [cursor, setCursor] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [selectedDay, setSelectedDay] = useState(today.toISOString().slice(0,10));
+
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const monthLabel = cursor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstWeekday = new Date(year, month, 1).getDay(); // 0=Sun
+
+  // Bucket events by YYYY-MM-DD
+  const byDay = {};
+  events.forEach(e => {
+    if (!e.date) return;
+    (byDay[e.date] = byDay[e.date] || []).push(e);
+  });
+
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    cells.push({ day: d, iso, events: byDay[iso] || [] });
+  }
+  while (cells.length % 7) cells.push(null);
+
+  const todayIso = today.toISOString().slice(0,10);
+  const selectedEvents = (byDay[selectedDay] || []).sort((a,b) => (a.time || '').localeCompare(b.time || ''));
+
+  const nextMonth = () => setCursor(new Date(year, month + 1, 1));
+  const prevMonth = () => setCursor(new Date(year, month - 1, 1));
+
+  return (
+    <div className="p-3 pt-2">
+      {/* Month header */}
+      <div className="flex items-center justify-between mb-3 px-1">
+        <button onClick={prevMonth} className="w-9 h-9 rounded-full bg-zinc-900 border-2 border-zinc-800 flex items-center justify-center active:scale-95">
+          <ArrowLeft size={16} />
+        </button>
+        <div className="text-center">
+          <p className="text-xs text-zinc-400 font-black uppercase tracking-widest">Next rideout</p>
+          <p className="font-black text-lg uppercase">{monthLabel}</p>
+        </div>
+        <button onClick={nextMonth} className="w-9 h-9 rounded-full bg-zinc-900 border-2 border-zinc-800 flex items-center justify-center active:scale-95">
+          <ArrowRight size={16} />
+        </button>
+      </div>
+
+      {/* Weekday header */}
+      <div className="grid grid-cols-7 gap-1 mb-1">
+        {['S','M','T','W','T','F','S'].map((d, i) => (
+          <div key={i} className="text-center text-[10px] font-black text-zinc-500 uppercase tracking-widest py-1">{d}</div>
+        ))}
+      </div>
+
+      {/* Calendar grid */}
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((c, i) => {
+          if (!c) return <div key={i} className="aspect-square" />;
+          const isToday = c.iso === todayIso;
+          const isSelected = c.iso === selectedDay;
+          const isPast = c.iso < todayIso;
+          const hasEvents = c.events.length > 0;
+          const avatars = c.events.slice(0, 3);
+          return (
+            <button
+              key={i}
+              onClick={() => setSelectedDay(c.iso)}
+              className={`aspect-square rounded-xl p-1 flex flex-col items-center justify-start relative border-2 transition
+                ${isSelected ? 'border-pink-500 bg-zinc-800' : hasEvents ? 'border-pink-500/40 bg-zinc-900' : 'border-zinc-800 bg-zinc-900'}
+                ${isPast && !hasEvents ? 'opacity-40' : ''}
+                active:scale-95`}
+            >
+              <span className={`text-xs font-black ${isToday ? 'bg-pink-500 text-white rounded-full w-6 h-6 flex items-center justify-center' : 'py-1'}`}>{c.day}</span>
+              {hasEvents && (
+                <div className="flex -space-x-1.5 mt-0.5">
+                  {avatars.map((ev, idx) => (
+                    ev.hostAvatar ? (
+                      <img key={idx} src={ev.hostAvatar} alt={ev.host}
+                        className="w-4 h-4 rounded-full border border-zinc-900 object-cover" />
+                    ) : (
+                      <div key={idx} className={`w-4 h-4 rounded-full border border-zinc-900 ${rideColors[ev.type] || 'bg-pink-500'}`} />
+                    )
+                  ))}
+                  {c.events.length > 3 && (
+                    <div className="w-4 h-4 rounded-full border border-zinc-900 bg-zinc-700 flex items-center justify-center text-[8px] font-black">+{c.events.length - 3}</div>
+                  )}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Selected day list */}
+      <div className="mt-4">
+        <h3 className="text-xs text-zinc-400 font-black uppercase tracking-widest mb-2 px-1">
+          {new Date(selectedDay + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+          <span className="text-zinc-500"> · {selectedEvents.length} {selectedEvents.length === 1 ? 'rideout' : 'rideouts'}</span>
+        </h3>
+        {selectedEvents.length === 0 ? (
+          <div className="bg-zinc-900 rounded-2xl p-6 text-center border-2 border-dashed border-zinc-800">
+            <Calendar size={28} className="mx-auto text-zinc-600 mb-1" />
+            <p className="text-sm text-zinc-400">No rideouts on this day yet.</p>
+            <p className="text-[11px] text-zinc-500 mt-1">Hit the big + button to plan one.</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {selectedEvents.map(event => {
+              const Icon = rideIcons[event.type];
+              const isJoined = joinedEvents.includes(event.id);
+              return (
+                <button key={event.id} onClick={() => onEventClick(event)}
+                  className="w-full text-left bg-zinc-900 rounded-2xl overflow-hidden border-2 border-zinc-800 active:scale-[0.99]">
+                  <div className={`${rideColors[event.type]} px-4 py-2 flex items-center justify-between`}>
+                    <span className="text-sm font-black uppercase">{event.time || 'Time TBD'}</span>
+                    <div className="flex items-center gap-2">
+                      {event.hostAvatar && (
+                        <img src={event.hostAvatar} alt={event.host}
+                          className="w-6 h-6 rounded-full border-2 border-white object-cover" />
+                      )}
+                      <Icon size={18} />
+                    </div>
+                  </div>
+                  <div className="p-3">
+                    <h3 className="font-black">{event.title}</h3>
+                    <p className="text-xs text-zinc-400 mt-0.5">Hosted by {event.host} · {event.location}</p>
+                    <div className="flex items-center justify-between mt-2">
+                      <span className="flex items-center gap-1 text-xs text-zinc-300"><Users size={12} />{event.attendees}</span>
+                      {isJoined && <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-pink-500 text-white uppercase">Joined</span>}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -772,8 +907,17 @@ function EventCard({ event, rideIcons, rideColors, isJoined, isFriendHost, onCli
   return (
     <button onClick={onClick} className="w-full bg-zinc-900 rounded-2xl p-4 text-left hover:bg-zinc-800 transition border-2 border-zinc-800">
       <div className="flex items-start gap-3">
-        <div className={`${rideColors[event.type]} w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 border-2 border-white`}>
-          <Icon size={22} />
+        <div className="relative flex-shrink-0">
+          <div className={`${rideColors[event.type]} w-12 h-12 rounded-xl flex items-center justify-center border-2 border-white`}>
+            <Icon size={22} />
+          </div>
+          {event.hostAvatar && (
+            <img
+              src={event.hostAvatar}
+              alt={event.host}
+              className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full border-2 border-zinc-900 object-cover"
+            />
+          )}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between gap-2">

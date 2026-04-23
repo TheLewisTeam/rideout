@@ -58,11 +58,13 @@ create table if not exists public.rideouts (
   coords_lng         double precision,
   host_name          text,
   host_code          text,
+  host_avatar        text,
   level              text,
   description        text,
   beginner_friendly  boolean default false,
   created_at         timestamptz default now()
 );
+alter table public.rideouts add column if not exists host_avatar text;
 create index if not exists rideouts_date_idx on public.rideouts (date);
 
 -- Rideout joins: who's RSVPing to what. Unique per (rideout, rider).
