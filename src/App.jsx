@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy, Upload, LocateFixed, RefreshCw, Radio, Bell, BellRing, Eye } from 'lucide-react';
+import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy, Upload, LocateFixed, RefreshCw, Radio, Bell, BellRing, Eye, Pencil } from 'lucide-react';
 import {
   supabaseReady,
   upsertRider,
@@ -23,6 +23,13 @@ import {
   deleteFeedPost,
   toggleFeedLike,
   subscribeFeed,
+  fetchCrews,
+  createCrewRemote,
+  updateCrewRemote,
+  joinCrewRemote,
+  leaveCrewRemote,
+  addRiderToCrew,
+  subscribeCrews,
 } from './lib/supabase';
 
 // Random 6-char rider code for guardian linking (no confusing chars)
@@ -369,6 +376,8 @@ export default function RideoutApp() {
   const [showSOS, setShowSOS] = useState(false);
   const [showShops, setShowShops] = useState(false);
   const [showCreateCrew, setShowCreateCrew] = useState(false);
+  const [editingCrew, setEditingCrew] = useState(null);
+  const [addRiderCrew, setAddRiderCrew] = useState(null); // crew object or null
   const [showTrustedContact, setShowTrustedContact] = useState(false);
   const [qrShare, setQrShare] = useState(null); // { title, subtitle, url, accentColor }
 
@@ -421,6 +430,48 @@ export default function RideoutApp() {
     reload();
     const unsub = subscribeFeed(() => reload());
     return () => { cancelled = true; unsub(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.riderCode]);
+
+  // SHARED CREWS — load every crew + rider list, live. Local optimistic edits
+  // get reconciled with the server snapshot on every subscribe callback.
+  useEffect(() => {
+    if (!supabaseReady) return;
+    let cancelled = false;
+    const reload = () => fetchCrews(profile.riderCode).then((rows) => {
+      if (cancelled) return;
+      setCrews((prev) => {
+        // Keep any local-only crews (offline fallback) that haven't been
+        // uploaded yet. Everything with a real UUID id comes from the server.
+        const localOnly = prev.filter((c) => typeof c.id === 'string' && c.id.startsWith('crew-'));
+        return [...rows, ...localOnly];
+      });
+    });
+    reload();
+    const unsub = subscribeCrews(() => reload());
+    return () => { cancelled = true; unsub(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.riderCode]);
+
+  // CREW INVITE — when the URL has ?join=<crewId>, auto-add the viewer to that
+  // crew (if they have a rider code) and strip the param so refresh doesn't loop.
+  useEffect(() => {
+    if (!supabaseReady || !profile.riderCode) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const crewId = params.get('join');
+      if (!crewId) return;
+      joinCrewRemote({
+        crewId, riderCode: profile.riderCode,
+        riderName: profile.name, avatar: profile.avatar,
+      }).then(() => {
+        // Strip ?join= so we don't re-trigger on every refresh.
+        params.delete('join');
+        const qs = params.toString();
+        const next = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+        window.history.replaceState({}, '', next);
+      });
+    } catch (e) { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.riderCode]);
 
@@ -522,8 +573,68 @@ export default function RideoutApp() {
     setFriends(friends.map(f => f.id === friendId ? {...f, isFriend: !f.isFriend} : f));
   };
 
+  // Join a crew you previously left, or were not a member of.
+  // Optimistic update — subscribeCrews reconciles with server state.
+  const joinCrew = (crewId) => {
+    setCrews(crews.map(c => {
+      if (c.id !== crewId) return c;
+      if (c.isJoined) return c; // already joined — no-op
+      return { ...c, isJoined: true, left: false, members: (c.members || 0) + 1 };
+    }));
+    if (supabaseReady && profile.riderCode) {
+      joinCrewRemote({
+        crewId, riderCode: profile.riderCode,
+        riderName: profile.name, avatar: profile.avatar,
+      });
+    }
+  };
+
+  // Leave a crew but keep it visible in the list (with strikethrough).
+  const leaveCrew = (crewId) => {
+    setCrews(crews.map(c => {
+      if (c.id !== crewId) return c;
+      if (!c.isJoined) return c; // already not a member
+      return { ...c, isJoined: false, left: true, leftAt: Date.now(), members: Math.max(0, (c.members || 1) - 1) };
+    }));
+    if (supabaseReady && profile.riderCode) {
+      leaveCrewRemote({ crewId, riderCode: profile.riderCode });
+    }
+  };
+
+  // Update crew fields (edit). Only fields in `patch` are changed.
+  const updateCrew = (crewId, patch) => {
+    setCrews(crews.map(c => c.id === crewId ? { ...c, ...patch } : c));
+    if (supabaseReady && !String(crewId).startsWith('crew-')) {
+      updateCrewRemote(crewId, patch);
+    }
+  };
+
+  // Add another rider to a crew by their rider code (QR scan or manual entry).
+  // Returns { ok, error } so the modal can show feedback.
+  const addCrewRider = async (crewId, riderCode) => {
+    const code = (riderCode || '').trim().toUpperCase();
+    if (!code) return { error: 'Enter a rider code.' };
+    if (!supabaseReady) return { error: 'You need to be online to add riders.' };
+    const res = await addRiderToCrew({ crewId, riderCode: code });
+    if (res && res.error) return { error: res.error };
+    // Optimistic bump of member count + rider list in local state.
+    setCrews(prev => prev.map(c => {
+      if (c.id !== crewId) return c;
+      const already = (c.riders || []).some(r => r.code === code && !r.left);
+      const nextRiders = already ? c.riders : [...(c.riders || []), {
+        code, name: res.rider?.name || null, avatar: res.rider?.avatar || null,
+        role: 'member', joinedAt: new Date().toISOString(), leftAt: null, left: false,
+      }];
+      return { ...c, riders: nextRiders, members: already ? c.members : (c.members || 0) + 1 };
+    }));
+    return { ok: true };
+  };
+
+  // Legacy name kept for any older callers — route to join/leave based on current state.
   const toggleCrewJoin = (crewId) => {
-    setCrews(crews.map(c => c.id === crewId ? {...c, isJoined: !c.isJoined, members: c.members + (c.isJoined ? -1 : 1)} : c));
+    const c = crews.find(x => x.id === crewId);
+    if (!c) return;
+    if (c.isJoined) leaveCrew(crewId); else joinCrew(crewId);
   };
 
   const toggleLike = (postId) => {
@@ -754,15 +865,34 @@ export default function RideoutApp() {
         />
       )}
 
-      {selectedCrew && (
-        <CrewDetailModal
-          crew={selectedCrew} events={events.filter(e => e.crewId === selectedCrew.id)}
-          onClose={() => setSelectedCrew(null)}
-          onToggleJoin={() => toggleCrewJoin(selectedCrew.id)}
-          onEventClick={(e) => { setSelectedCrew(null); setSelectedEvent(e); }}
-          onShare={() => openShareCrew(selectedCrew)}
-          rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels}
-          formatDate={formatDate}
+      {selectedCrew && (() => {
+        // Always render from the freshest crew in state so Join/Leave/Edit show
+        // the latest values without having to close and reopen the modal.
+        const live = crews.find(c => c.id === selectedCrew.id) || selectedCrew;
+        return (
+          <CrewDetailModal
+            crew={live} events={events.filter(e => e.crewId === live.id)}
+            viewerCode={profile.riderCode}
+            onClose={() => setSelectedCrew(null)}
+            onJoin={() => joinCrew(live.id)}
+            onLeave={() => leaveCrew(live.id)}
+            onEdit={() => setEditingCrew(live)}
+            onAddRider={() => setAddRiderCrew(live)}
+            onEventClick={(e) => { setSelectedCrew(null); setSelectedEvent(e); }}
+            onShare={() => openShareCrew(live)}
+            rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels}
+            formatDate={formatDate}
+          />
+        );
+      })()}
+      {addRiderCrew && (
+        <AddRiderToCrewModal
+          crew={addRiderCrew}
+          onClose={() => setAddRiderCrew(null)}
+          onAddByCode={async (code) => {
+            const res = await addCrewRider(addRiderCrew.id, code);
+            return res;
+          }}
         />
       )}
 
@@ -775,10 +905,61 @@ export default function RideoutApp() {
       {showTrustedContact && <TrustedContactModal profile={profile} setProfile={setProfile} onClose={() => setShowTrustedContact(false)} />}
       {showShareLocation && <ShareLocationModal profile={profile} setProfile={setProfile} friends={friends} onClose={() => setShowShareLocation(false)} />}
       {showCreateCrew && (
-        <CreateCrewModal
+        <CrewFormModal
+          mode="create"
           profileCity={profile.city}
           onClose={() => setShowCreateCrew(false)}
-          onCreate={(c) => { setCrews([...crews, {...c, id: crews.length + 1, isJoined: true, members: 1, verified: false, founded: String(new Date().getFullYear())}]); setShowCreateCrew(false); }}
+          onSubmit={async (c) => {
+            // Optimistic: add locally with a temp id while Supabase writes.
+            const tempId = `crew-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+            const optimistic = {
+              ...c,
+              id: tempId,
+              isJoined: true,
+              left: false,
+              members: 1,
+              verified: false,
+              founded: String(new Date().getFullYear()),
+              ownerCode: profile.riderCode || null,
+              ownerName: profile.name || null,
+              riders: profile.riderCode ? [{
+                code: profile.riderCode, name: profile.name, avatar: profile.avatar,
+                role: 'owner', joinedAt: new Date().toISOString(), leftAt: null, left: false,
+              }] : [],
+            };
+            setCrews([optimistic, ...crews]);
+            setShowCreateCrew(false);
+            if (supabaseReady) {
+              const res = await createCrewRemote(c, {
+                ownerCode: profile.riderCode,
+                ownerName: profile.name,
+                avatar: profile.avatar,
+              });
+              if (res && res.data) {
+                // Swap the temp row out for the real one from the server.
+                setCrews(prev => {
+                  const without = prev.filter(x => x.id !== tempId && x.id !== res.data.id);
+                  return [res.data, ...without];
+                });
+              } else if (res && res.error) {
+                alert('Could not save crew: ' + res.error + '\nIt will stay on this device only.');
+              }
+            }
+          }}
+        />
+      )}
+      {editingCrew && (
+        <CrewFormModal
+          mode="edit"
+          profileCity={profile.city}
+          initialCrew={editingCrew}
+          onClose={() => setEditingCrew(null)}
+          onSubmit={(patch) => {
+            updateCrew(editingCrew.id, patch);
+            // Keep detail modal in sync with the new crew data.
+            setSelectedCrew((prev) => prev && prev.id === editingCrew.id ? { ...prev, ...patch } : prev);
+            setEditingCrew(null);
+          }}
         />
       )}
       {showCreateEvent && (
@@ -1170,8 +1351,10 @@ function EventCard({ event, rideIcons, rideColors, isJoined, isFriendHost, onCli
 
 // ===== CREWS =====
 function CrewsScreen({ crews, onCrewClick, onCreateCrew, rideIcons, rideColors, rideLabels }) {
-  const myCrews = crews.filter(c => c.isJoined);
-  const otherCrews = crews.filter(c => !c.isJoined);
+  // Joined AND left crews both live in "Your crews" — left ones just render with
+  // a strikethrough so the user can see they used to ride with them.
+  const myCrews = crews.filter(c => c.isJoined || c.left);
+  const otherCrews = crews.filter(c => !c.isJoined && !c.left);
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
@@ -1184,7 +1367,7 @@ function CrewsScreen({ crews, onCrewClick, onCreateCrew, rideIcons, rideColors, 
         <div className="mb-5">
           <h3 className="text-xs text-zinc-400 font-black uppercase mb-2 tracking-wider">Your crews</h3>
           <div className="space-y-2">
-            {myCrews.map(c => <CrewCard key={c.id} crew={c} onClick={() => onCrewClick(c)} rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels} />)}
+            {myCrews.map(c => <CrewCard key={c.id} crew={c} struck={!!c.left} onClick={() => onCrewClick(c)} rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels} />)}
           </div>
         </div>
       )}
@@ -1207,50 +1390,66 @@ function CrewsScreen({ crews, onCrewClick, onCreateCrew, rideIcons, rideColors, 
   );
 }
 
-function CrewCard({ crew, onClick, rideIcons, rideColors, rideLabels }) {
+function CrewCard({ crew, onClick, rideIcons, rideColors, rideLabels, struck = false }) {
   const Icon = rideIcons[crew.rideType];
+  // `struck` → this crew is in the "left" state. We fade it out and apply
+  // line-through to the text so the user can see they used to be a member.
+  const strikeCls = struck ? 'line-through decoration-2' : '';
   return (
-    <button onClick={onClick} className="w-full bg-zinc-900 rounded-2xl overflow-hidden border-2 border-zinc-800 text-left">
+    <button onClick={onClick} className={`w-full bg-zinc-900 rounded-2xl overflow-hidden border-2 border-zinc-800 text-left ${struck ? 'opacity-70' : ''}`}>
       <div className={`${crew.color} p-3 flex items-center gap-3`}>
-        <div className="w-14 h-14 rounded-xl bg-white/20 border-2 border-white flex items-center justify-center font-black text-lg backdrop-blur">
+        <div className={`w-14 h-14 rounded-xl bg-white/20 border-2 border-white flex items-center justify-center font-black text-lg backdrop-blur ${struck ? 'grayscale-0' : ''}`}>
           {crew.tag}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="font-black uppercase flex items-center gap-1 truncate">
+          <p className={`font-black uppercase flex items-center gap-1 truncate ${strikeCls}`}>
             {crew.name}
             {crew.verified && <VerifiedBadge size={12} />}
           </p>
-          <p className="text-xs text-white/90 font-semibold flex items-center gap-2 mt-0.5">
+          <p className={`text-xs text-white/90 font-semibold flex items-center gap-2 mt-0.5 ${strikeCls}`}>
             <Icon size={11} />{rideLabels[crew.rideType]} · <Users size={11} />{crew.members}
           </p>
         </div>
         {crew.isJoined && <span className="bg-white text-zinc-900 text-[10px] font-black px-2 py-1 rounded-full uppercase">Member</span>}
+        {struck && <span className="bg-zinc-900 text-zinc-200 text-[10px] font-black px-2 py-1 rounded-full uppercase border border-zinc-700">Left</span>}
       </div>
       <div className="p-3">
-        <p className="text-xs text-zinc-300 line-clamp-2">{crew.description}</p>
-        <p className="text-[10px] text-zinc-500 font-semibold mt-1.5 uppercase">{crew.city} · Est. {crew.founded}</p>
+        <p className={`text-xs text-zinc-300 line-clamp-2 ${strikeCls}`}>{crew.description}</p>
+        <p className={`text-[10px] text-zinc-500 font-semibold mt-1.5 uppercase ${strikeCls}`}>{crew.city} · Est. {crew.founded}</p>
       </div>
     </button>
   );
 }
 
-function CrewDetailModal({ crew, events, onClose, onToggleJoin, onEventClick, onShare, rideIcons, rideColors, rideLabels, formatDate }) {
+function CrewDetailModal({ crew, events, viewerCode, onClose, onJoin, onLeave, onEdit, onAddRider, onEventClick, onShare, rideIcons, rideColors, rideLabels, formatDate }) {
   const Icon = rideIcons[crew.rideType];
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  // Owner = whoever's rider code is stamped on the crew. Older crews created
+  // before we tracked ownership won't have one — in that case, allow edit for
+  // anyone who is a member, as a sensible fallback.
+  const isOwner = (crew.ownerCode && viewerCode && crew.ownerCode === viewerCode) || (!crew.ownerCode && crew.isJoined);
   return (
     <div className="absolute inset-0 bg-zinc-950 z-50 flex flex-col overflow-hidden">
       <div className={`${crew.color} px-4 pb-4`} style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)'}}>
         <div className="flex items-center justify-between mb-3">
           <button onClick={onClose}><ArrowLeft size={22} /></button>
-          <button onClick={onShare} className="bg-white/20 backdrop-blur border-2 border-white rounded-full px-3 py-1.5 flex items-center gap-1.5 text-xs font-black uppercase">
-            <QrCode size={14} />Share crew
-          </button>
+          <div className="flex items-center gap-2">
+            {isOwner && (
+              <button onClick={onEdit} className="bg-white/20 backdrop-blur border-2 border-white rounded-full px-3 py-1.5 flex items-center gap-1.5 text-xs font-black uppercase">
+                <Pencil size={14} />Edit
+              </button>
+            )}
+            <button onClick={onShare} className="bg-white/20 backdrop-blur border-2 border-white rounded-full px-3 py-1.5 flex items-center gap-1.5 text-xs font-black uppercase">
+              <QrCode size={14} />Share crew
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           <div className="w-20 h-20 rounded-2xl bg-white/20 border-4 border-white flex items-center justify-center font-black text-2xl backdrop-blur">
             {crew.tag}
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="font-black text-xl uppercase flex items-center gap-1">
+            <h2 className={`font-black text-xl uppercase flex items-center gap-1 ${crew.left ? 'line-through decoration-2' : ''}`}>
               {crew.name}
               {crew.verified && <VerifiedBadge size={18} />}
             </h2>
@@ -1258,6 +1457,9 @@ function CrewDetailModal({ crew, events, onClose, onToggleJoin, onEventClick, on
               <Icon size={12} />{rideLabels[crew.rideType]}
             </p>
             <p className="text-xs text-white/80 font-semibold mt-0.5">{crew.city} · Est. {crew.founded}</p>
+            {crew.left && (
+              <p className="text-[10px] text-white/90 font-black uppercase mt-1 bg-black/30 inline-block px-2 py-0.5 rounded-full">You left this crew</p>
+            )}
           </div>
         </div>
       </div>
@@ -1281,12 +1483,64 @@ function CrewDetailModal({ crew, events, onClose, onToggleJoin, onEventClick, on
           <p className="text-xs text-zinc-400 font-black uppercase mb-1">About</p>
           <p className="text-sm">{crew.description}</p>
         </div>
-        <button onClick={onToggleJoin}
-          className={`w-full py-3 rounded-xl font-black uppercase border-2 mb-4 ${
-            crew.isJoined ? 'bg-zinc-800 text-zinc-300 border-zinc-700' : 'bg-gradient-to-r from-pink-500 to-blue-500 text-white border-white'
-          }`}>
-          {crew.isJoined ? '✓ Member — tap to leave' : 'Join crew'}
-        </button>
+        {crew.isJoined ? (
+          confirmLeave ? (
+            <div className="mb-4 bg-zinc-900 border-2 border-pink-500 rounded-xl p-3 space-y-2">
+              <p className="text-sm font-black uppercase">Leave {crew.name}?</p>
+              <p className="text-xs text-zinc-400 font-semibold">It'll stay in your crew list with a strikethrough so you can rejoin later.</p>
+              <div className="flex gap-2">
+                <button onClick={() => setConfirmLeave(false)} className="flex-1 py-2 rounded-xl font-black uppercase border-2 border-zinc-700 text-zinc-300 text-sm">Cancel</button>
+                <button onClick={() => { setConfirmLeave(false); onLeave(); }} className="flex-1 py-2 rounded-xl font-black uppercase bg-pink-600 border-2 border-white text-white text-sm">Leave crew</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmLeave(true)}
+              className="w-full py-3 rounded-xl font-black uppercase border-2 mb-4 bg-zinc-800 text-zinc-300 border-zinc-700">
+              ✓ Member — tap to leave
+            </button>
+          )
+        ) : (
+          <button onClick={onJoin}
+            className="w-full py-3 rounded-xl font-black uppercase border-2 mb-4 bg-gradient-to-r from-pink-500 to-blue-500 text-white border-white">
+            {crew.left ? 'Rejoin crew' : 'Join crew'}
+          </button>
+        )}
+
+        {/* Riders list — everyone who's currently in the crew, plus people
+            who left (rendered with a strikethrough like the crew itself). */}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-xs text-zinc-400 font-black uppercase tracking-wider">Riders</h3>
+            {crew.isJoined && (
+              <button onClick={onAddRider}
+                className="bg-gradient-to-r from-pink-500 to-blue-500 border-2 border-white px-3 py-1 rounded-full text-[10px] font-black uppercase flex items-center gap-1">
+                <UserPlus size={11} />Add rider
+              </button>
+            )}
+          </div>
+          {(crew.riders && crew.riders.length > 0) ? (
+            <div className="space-y-2">
+              {crew.riders.map(r => (
+                <div key={r.code} className={`bg-zinc-900 rounded-xl p-2.5 flex items-center gap-3 border-2 border-zinc-800 ${r.left ? 'opacity-60' : ''}`}>
+                  {r.avatar
+                    ? <img src={r.avatar} alt="" className="w-9 h-9 rounded-full object-cover border-2 border-white" />
+                    : <div className="w-9 h-9 rounded-full bg-gradient-to-br from-pink-500 to-blue-500 flex items-center justify-center font-black text-sm border-2 border-white">{(r.name || r.code || 'R')[0].toUpperCase()}</div>}
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-black truncate ${r.left ? 'line-through decoration-2' : ''}`}>{r.name || 'Rider'}</p>
+                    <p className="text-[10px] text-zinc-500 font-mono tracking-widest">{r.code}</p>
+                  </div>
+                  {r.role === 'owner' && <span className="bg-amber-400 text-zinc-900 text-[9px] font-black px-2 py-0.5 rounded-full uppercase flex items-center gap-1"><Crown size={9} />Owner</span>}
+                  {r.left && <span className="bg-zinc-800 text-zinc-300 text-[9px] font-black px-2 py-0.5 rounded-full uppercase border border-zinc-700">Left</span>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="bg-zinc-900 rounded-xl p-3 border-2 border-dashed border-zinc-800 text-center">
+              <p className="text-xs text-zinc-400 font-semibold">No riders linked yet. {crew.isJoined && 'Tap Add rider to invite one.'}</p>
+            </div>
+          )}
+        </div>
+
         {events.length > 0 && (
           <div>
             <h3 className="text-xs text-zinc-400 font-black uppercase mb-2 tracking-wider">Upcoming crew rides</h3>
@@ -1314,14 +1568,31 @@ function CrewDetailModal({ crew, events, onClose, onToggleJoin, onEventClick, on
   );
 }
 
-function CreateCrewModal({ onClose, onCreate, profileCity = '' }) {
-  const [form, setForm] = useState({ name: '', tag: '', city: profileCity, rideType: 'bike', description: '', color: 'bg-pink-500' });
+// Unified crew form — used for both creating a new crew and editing an
+// existing one. `mode` flips titles/buttons; `initialCrew` pre-fills fields.
+function CrewFormModal({ onClose, onSubmit, profileCity = '', mode = 'create', initialCrew = null }) {
+  const [form, setForm] = useState(() => {
+    if (initialCrew) {
+      return {
+        name: initialCrew.name || '',
+        tag: initialCrew.tag || '',
+        city: initialCrew.city || profileCity || '',
+        rideType: initialCrew.rideType || 'bike',
+        description: initialCrew.description || '',
+        color: initialCrew.color || 'bg-pink-500',
+      };
+    }
+    return { name: '', tag: '', city: profileCity, rideType: 'bike', description: '', color: 'bg-pink-500' };
+  });
   const colors = ['bg-pink-500', 'bg-blue-500', 'bg-amber-400', 'bg-lime-400', 'bg-fuchsia-500', 'bg-cyan-400'];
+  const rideTypes = ['bike', 'ebike', 'skates', 'scooter', 'escooter', 'other'];
+  const rideTypeLabels = { bike: 'Bike', ebike: 'E-Bike', skates: 'Skates', scooter: 'Scooter', escooter: 'E-Scooter', other: 'Other' };
+  const isEdit = mode === 'edit';
   return (
     <div className="absolute inset-0 bg-black/80 z-50 flex items-end" onClick={onClose}>
       <div className="bg-zinc-950 rounded-t-3xl w-full p-5 border-t-4 border-pink-500 max-h-[90%] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
-          <h2 className="font-black text-xl uppercase">Start a crew</h2>
+          <h2 className="font-black text-xl uppercase">{isEdit ? 'Edit crew' : 'Start a crew'}</h2>
           <button onClick={onClose}><X size={20} /></button>
         </div>
         <div className="space-y-3">
@@ -1341,6 +1612,17 @@ function CreateCrewModal({ onClose, onCreate, profileCity = '' }) {
               className="w-full bg-zinc-900 rounded-xl px-4 py-3 mt-1 text-sm outline-none border-2 border-zinc-800 focus:border-pink-500" />
           </div>
           <div>
+            <label className="text-xs text-zinc-400 font-black uppercase">Ride type</label>
+            <div className="flex gap-2 mt-1 flex-wrap">
+              {rideTypes.map(rt => (
+                <button key={rt} onClick={() => setForm({...form, rideType: rt})}
+                  className={`px-3 py-2 rounded-xl text-xs font-black uppercase border-2 ${form.rideType === rt ? 'bg-pink-500 border-white text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}>
+                  {rideTypeLabels[rt]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
             <label className="text-xs text-zinc-400 font-black uppercase">Crew color</label>
             <div className="flex gap-2 mt-1">
               {colors.map(c => (
@@ -1354,14 +1636,20 @@ function CreateCrewModal({ onClose, onCreate, profileCity = '' }) {
             <textarea value={form.description} onChange={e => setForm({...form, description: e.target.value})} rows="3" placeholder="What's your crew about?"
               className="w-full bg-zinc-900 rounded-xl px-4 py-3 mt-1 text-sm outline-none border-2 border-zinc-800 focus:border-pink-500 resize-none" />
           </div>
-          <button onClick={() => onCreate(form)} disabled={!form.name || !form.tag}
+          <button onClick={() => onSubmit(form)} disabled={!form.name || !form.tag}
             className="w-full py-3 rounded-xl font-black uppercase bg-gradient-to-r from-pink-500 to-blue-500 disabled:opacity-40 border-2 border-white">
-            Create crew
+            {isEdit ? 'Save changes' : 'Create crew'}
           </button>
         </div>
       </div>
     </div>
   );
+}
+
+// Back-compat alias — older code paths (and any external refs) still expect
+// CreateCrewModal. It just forwards to the unified CrewFormModal.
+function CreateCrewModal({ onClose, onCreate, profileCity = '' }) {
+  return <CrewFormModal mode="create" profileCity={profileCity} onClose={onClose} onSubmit={onCreate} />;
 }
 
 // ===== FEED =====
@@ -1824,6 +2112,29 @@ function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCre
             );
           })}
           {joinedEvents.length === 0 && <p className="text-zinc-400 text-sm text-center py-4">No rideouts joined yet!</p>}
+        </div>
+      </div>
+      {/* COMMUNITY PARTNER — THE LEWIS TEAM */}
+      <div className="mt-6">
+        <h3 className="text-xs text-zinc-400 font-black uppercase mb-2 tracking-wider">Community partner</h3>
+        <div className="rounded-2xl overflow-hidden border-2 border-amber-400/40 bg-zinc-900 shadow-lg">
+          <img
+            src="/lewis-team.jpg"
+            alt="The Lewis Team — HomeLife Real Estate"
+            className="w-full h-auto block"
+            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+          />
+          <div className="p-4 bg-gradient-to-br from-amber-500/10 to-emerald-500/10 border-t-2 border-amber-400/30">
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-300">Proudly sponsored by</p>
+            <p className="text-base font-black uppercase tracking-wide text-white mt-1">The Lewis Team · HomeLife</p>
+            <p className="text-xs text-zinc-300 mt-1">Buying or selling in Central Florida? Riders get the hometown treatment.</p>
+            <a
+              href="tel:8632881772"
+              className="mt-3 w-full inline-flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-emerald-500 text-zinc-950 font-black uppercase px-4 py-2.5 rounded-xl border-2 border-white active:scale-95 text-sm">
+              <Phone size={16} />
+              Call 863-288-1772
+            </a>
+          </div>
         </div>
       </div>
       {/* BRAND CREDIT */}
@@ -3805,6 +4116,95 @@ function PagerOverlay({ page, onDismiss }) {
   );
 }
 
+// ===== ADD RIDER TO CREW MODAL =====
+// Two ways to add a rider: show a QR code that encodes the crew invite URL
+// (rider scans → lands back in Rideout and joins), or paste their 6-char
+// rider code directly. The QR points at /c/<tag>?join=<crewId>.
+function AddRiderToCrewModal({ crew, onClose, onAddByCode }) {
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState(null); // { type: 'ok'|'err', msg }
+  // Invite URL — anyone who opens this on their phone lands on Rideout with
+  // the crew pre-selected. We keep it simple: tag + crewId.
+  const inviteUrl = `https://rideout-lilac.vercel.app/c/${crew.tag}?join=${crew.id}`;
+  const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(inviteUrl)}&size=360x360&bgcolor=ffffff&color=000000&margin=10`;
+
+  const submit = async () => {
+    const clean = code.trim().toUpperCase();
+    if (!clean) { setStatus({ type: 'err', msg: 'Enter a rider code.' }); return; }
+    setBusy(true);
+    setStatus(null);
+    const res = await onAddByCode(clean);
+    setBusy(false);
+    if (res && res.ok) {
+      setStatus({ type: 'ok', msg: `Added ${clean} to ${crew.name}.` });
+      setCode('');
+    } else {
+      setStatus({ type: 'err', msg: res?.error || 'Could not add rider.' });
+    }
+  };
+
+  const copyInvite = async () => {
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setStatus({ type: 'ok', msg: 'Invite link copied.' });
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="absolute inset-0 bg-black/90 z-[60] flex items-end" onClick={onClose}>
+      <div className="bg-zinc-950 rounded-t-3xl w-full border-t-4 border-pink-500 max-h-[94%] overflow-y-auto"
+           style={{paddingBottom: 'max(env(safe-area-inset-bottom), 1.25rem)'}} onClick={(e) => e.stopPropagation()}>
+        <div className={`${crew.color} px-5 pt-5 pb-4`}>
+          <div className="flex justify-between items-start mb-1">
+            <div className="flex items-center gap-2">
+              <UserPlus size={20} />
+              <h2 className="font-black text-lg uppercase tracking-wide">Add rider</h2>
+            </div>
+            <button onClick={onClose} className="bg-white/20 rounded-full p-1.5 border-2 border-white"><X size={16} /></button>
+          </div>
+          <p className="text-xs text-white/90 font-semibold">Invite someone to <span className="font-black">{crew.name}</span>.</p>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {/* QR block */}
+          <div className="bg-white rounded-2xl p-4 flex flex-col items-center">
+            <img src={qrSrc} alt="Crew invite QR" className="w-56 h-56 rounded-xl" />
+            <p className="text-zinc-900 text-xs font-black uppercase mt-3 tracking-wider">Scan to join {crew.tag}</p>
+            <p className="text-zinc-500 text-[10px] font-mono mt-1 break-all text-center">{inviteUrl}</p>
+            <button onClick={copyInvite}
+              className="mt-3 bg-zinc-900 text-white rounded-xl px-4 py-2 text-xs font-black uppercase flex items-center gap-2 border-2 border-zinc-800">
+              <Copy size={12} />Copy invite link
+            </button>
+          </div>
+
+          {/* Manual code entry */}
+          <div className="bg-zinc-900 rounded-2xl p-4 border-2 border-zinc-800">
+            <label className="text-xs text-zinc-400 font-black uppercase">Or type their rider code</label>
+            <p className="text-[10px] text-zinc-500 font-semibold mt-0.5">Find it on their profile screen — 6 characters like <span className="font-mono text-zinc-300">RDR-AB3</span>.</p>
+            <input
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              placeholder="ABC123"
+              maxLength={10}
+              className="w-full bg-zinc-950 rounded-xl px-4 py-3 mt-3 text-sm font-mono tracking-widest outline-none border-2 border-zinc-800 focus:border-pink-500"
+            />
+            <button onClick={submit} disabled={busy || !code.trim()}
+              className="w-full mt-3 py-3 rounded-xl font-black uppercase bg-gradient-to-r from-pink-500 to-blue-500 disabled:opacity-40 border-2 border-white flex items-center justify-center gap-2">
+              <UserPlus size={14} />{busy ? 'Adding…' : 'Add to crew'}
+            </button>
+            {status && (
+              <p className={`mt-2 text-xs font-black uppercase ${status.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+                {status.msg}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===== QR SHARE MODAL =====
 function QRShareModal({ data, onClose }) {
   const [copied, setCopied] = useState(false);
@@ -3859,7 +4259,7 @@ function QRShareModal({ data, onClose }) {
             </button>
           </div>
           <p className="text-center text-[10px] text-zinc-500 mt-3 font-semibold uppercase tracking-wide">
-            ⚡ No app install · opens instantly in browser
+            No app install — opens instantly in browser
           </p>
         </div>
       </div>

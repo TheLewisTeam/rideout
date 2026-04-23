@@ -121,6 +121,48 @@ create unique index if not exists feed_post_likes_unique
 create index if not exists feed_post_likes_post_idx
   on public.feed_post_likes (post_id);
 
+-- Crews: public crews that anyone can discover and join.
+-- `city_key` is a lowercase/trimmed version of city for fuzzy matching
+-- (so "Lakeland, FL" and "lakeland, fl" dedupe into one list).
+create table if not exists public.crews (
+  id           uuid primary key default gen_random_uuid(),
+  name         text not null,
+  tag          text,
+  city         text,
+  city_key     text,
+  ride_type    text,
+  description  text,
+  color        text,
+  founded      text,
+  verified     boolean default false,
+  owner_code   text,
+  owner_name   text,
+  created_at   timestamptz default now(),
+  updated_at   timestamptz default now()
+);
+create index if not exists crews_city_key_idx on public.crews (city_key);
+create index if not exists crews_created_at_idx on public.crews (created_at desc);
+
+-- Crew riders: join table for crew membership. Unique per (crew, rider).
+-- `left_at` is set when someone leaves so we can show the strikethrough
+-- without losing their history.
+create table if not exists public.crew_riders (
+  id          uuid primary key default gen_random_uuid(),
+  crew_id     uuid not null references public.crews(id) on delete cascade,
+  rider_code  text not null,
+  rider_name  text,
+  avatar      text,
+  role        text default 'member', -- 'owner' or 'member'
+  joined_at   timestamptz default now(),
+  left_at     timestamptz
+);
+create unique index if not exists crew_riders_unique
+  on public.crew_riders (crew_id, rider_code);
+create index if not exists crew_riders_rider_code_idx
+  on public.crew_riders (rider_code);
+create index if not exists crew_riders_crew_idx
+  on public.crew_riders (crew_id);
+
 -- ============================================================
 -- RLS — open policies (anon key can read/write).
 -- This is an open social-network style app with no auth yet.
@@ -135,6 +177,8 @@ alter table public.rideout_joins   enable row level security;
 alter table public.chat_messages   enable row level security;
 alter table public.feed_posts      enable row level security;
 alter table public.feed_post_likes enable row level security;
+alter table public.crews           enable row level security;
+alter table public.crew_riders     enable row level security;
 
 drop policy if exists "anon all riders" on public.riders;
 create policy "anon all riders"
@@ -168,6 +212,14 @@ drop policy if exists "anon all feed_post_likes" on public.feed_post_likes;
 create policy "anon all feed_post_likes"
   on public.feed_post_likes for all using (true) with check (true);
 
+drop policy if exists "anon all crews" on public.crews;
+create policy "anon all crews"
+  on public.crews for all using (true) with check (true);
+
+drop policy if exists "anon all crew_riders" on public.crew_riders;
+create policy "anon all crew_riders"
+  on public.crew_riders for all using (true) with check (true);
+
 -- ============================================================
 -- Realtime — stream row changes to subscribed clients.
 -- Safe to re-run: ignores "already member of publication" errors.
@@ -197,6 +249,12 @@ begin
   exception when duplicate_object then null;
   end;
   begin alter publication supabase_realtime add table public.feed_post_likes;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.crews;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.crew_riders;
   exception when duplicate_object then null;
   end;
 end $$;
