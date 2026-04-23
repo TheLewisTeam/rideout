@@ -109,6 +109,33 @@ function fireAlarmBeep() {
   } catch (e) { /* ignore — audio is best-effort */ }
 }
 
+// Friendly 3-note ascending chime for "new rideout posted" — lighter and
+// more musical than the alarm beep so riders can tell them apart at a glance.
+function fireNewRideoutChime() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const note = (at, freq, dur = 0.22) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(ctx.currentTime + at);
+      osc.stop(ctx.currentTime + at + dur + 0.02);
+    };
+    // C major arpeggio: C5 → E5 → G5
+    note(0.00, 523.25);
+    note(0.14, 659.25);
+    note(0.28, 783.99, 0.35);
+    setTimeout(() => { try { ctx.close(); } catch (e) {} }, 1200);
+  } catch (e) { /* ignore — audio is best-effort */ }
+}
+
 // Fire a browser notification if the user granted permission.
 function tryBrowserNotification(ev) {
   try {
@@ -409,13 +436,41 @@ export default function RideoutApp() {
   const [showChat, setShowChat] = useState(false);
 
   // SHARED CALENDAR — load rideouts from Supabase and keep them live across devices.
+  // Also chimes the phone when a new rideout is posted by someone else.
+  const seenRideoutIdsRef = useRef(null);
+  const myCodeRef = useRef(profile.riderCode);
+  useEffect(() => { myCodeRef.current = profile.riderCode; }, [profile.riderCode]);
   useEffect(() => {
     if (!supabaseReady) return;
     let cancelled = false;
-    fetchRideouts().then((rows) => { if (!cancelled) setEvents(rows); });
-    const unsub = subscribeRideouts(() => {
-      fetchRideouts().then((rows) => { if (!cancelled) setEvents(rows); });
+    const reload = (isInitial) => fetchRideouts().then((rows) => {
+      if (cancelled) return;
+      // Detect brand-new rideouts we haven't seen before, created by someone
+      // other than us. Skip chimes on the first load (populating baseline).
+      const prev = seenRideoutIdsRef.current;
+      if (prev && !isInitial) {
+        const myCode = (myCodeRef.current || '').toUpperCase();
+        const fresh = rows.filter((r) => !prev.has(r.id) && (r.hostCode || '').toUpperCase() !== myCode);
+        if (fresh.length > 0) {
+          fireNewRideoutChime();
+          // Optional browser notification if the page isn't focused.
+          try {
+            if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+              const ev = fresh[0];
+              new Notification('New rideout posted', {
+                body: `${ev.title || 'Ride'}${ev.location ? ' · ' + ev.location : ''}`,
+                icon: '/icon-192.png',
+                tag: `new-ride-${ev.id}`,
+              });
+            }
+          } catch (e) { /* best-effort */ }
+        }
+      }
+      seenRideoutIdsRef.current = new Set(rows.map((r) => r.id));
+      setEvents(rows);
     });
+    reload(true);
+    const unsub = subscribeRideouts(() => reload(false));
     return () => { cancelled = true; unsub(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
