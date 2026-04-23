@@ -21,10 +21,11 @@ export default function RideoutApp() {
   const [onboarded, setOnboarded] = useState(false);
   const [onboardStep, setOnboardStep] = useState(0);
   const [profile, setProfile] = useState({
-    name: 'Lancey', city: 'Winter Haven, FL', rideTypes: ['bike'],
+    name: '', city: '', rideTypes: ['bike'],
     verified: false, level: 'moderate',
     trustedContact: null, shareLocation: false
   });
+  const [showDemoTour, setShowDemoTour] = useState(false);
   const [activeTab, setActiveTab] = useState('discover');
   const [discoverSegment, setDiscoverSegment] = useState('rides'); // rides | calendar
   const [showCreateEvent, setShowCreateEvent] = useState(false);
@@ -33,7 +34,7 @@ export default function RideoutApp() {
   const [filterType, setFilterType] = useState('all');
   const [levelFilter, setLevelFilter] = useState('all');
   const [beginnerFriendly, setBeginnerFriendly] = useState(false);
-  const [joinedEvents, setJoinedEvents] = useState([1, 3]);
+  const [joinedEvents, setJoinedEvents] = useState([]);
   const [checkedIn, setCheckedIn] = useState({});
   const [mapView, setMapView] = useState('street');
   const [chatEventId, setChatEventId] = useState(null);
@@ -47,8 +48,8 @@ export default function RideoutApp() {
 
   const openShareApp = () => setQrShare({
     title: 'Join me on Rideout',
-    subtitle: `${profile.name}'s invite · Winter Haven crew`,
-    url: `rideout-lilac.vercel.app/i/${profile.name.toLowerCase().replace(/\s/g, '')}`,
+    subtitle: `${profile.name || 'Rider'}'s invite${profile.city ? ` · ${profile.city}` : ''}`,
+    url: `rideout-lilac.vercel.app/i/${(profile.name || 'rider').toLowerCase().replace(/\s/g, '')}`,
     accentColor: 'from-pink-500 to-blue-500'
   });
   const openShareCrew = (crew) => setQrShare({
@@ -64,169 +65,11 @@ export default function RideoutApp() {
     accentColor: 'from-pink-500 to-blue-500'
   });
 
-  const [friends, setFriends] = useState([
-    { id: 2, name: 'Marcus T.', city: 'Winter Haven, FL', rideType: 'bike', isFriend: true, avatar: 'bg-blue-500', verified: true },
-    { id: 3, name: 'Jayla R.', city: 'Lakeland, FL', rideType: 'skates', isFriend: true, avatar: 'bg-pink-500', verified: true },
-    { id: 4, name: 'Devon K.', city: 'Winter Haven, FL', rideType: 'scooter', isFriend: false, avatar: 'bg-cyan-400', verified: false },
-    { id: 5, name: 'Amara S.', city: 'Auburndale, FL', rideType: 'bike', isFriend: false, avatar: 'bg-purple-500', verified: true },
-    { id: 6, name: 'Riley P.', city: 'Haines City, FL', rideType: 'other', isFriend: true, avatar: 'bg-fuchsia-500', verified: false },
-    { id: 7, name: 'Tasha B.', city: 'Winter Haven, FL', rideType: 'ebike', isFriend: false, avatar: 'bg-pink-600', verified: true },
-    { id: 8, name: 'Malik F.', city: 'Lake Wales, FL', rideType: 'escooter', isFriend: false, avatar: 'bg-sky-500', verified: false }
-  ]);
-
-  const [crews, setCrews] = useState([
-    {
-      id: 1, name: 'Winter Haven Ride Out Club', tag: 'WHRC', city: 'Winter Haven, FL',
-      rideType: 'bike', members: 127, color: 'bg-pink-500', isJoined: true, verified: true,
-      description: 'The OG ride-out crew in Polk County. Weekly rides, deep roster, all love. 🚴‍♂️',
-      founded: '2021'
-    },
-    {
-      id: 2, name: 'Chain of Lakes Cruisers', tag: 'COLC', city: 'Winter Haven, FL',
-      rideType: 'bike', members: 54, color: 'bg-blue-500', isJoined: false, verified: true,
-      description: 'Casual weekend cruisers. Family-friendly. Lake loops and brunch rides.',
-      founded: '2022'
-    },
-    {
-      id: 3, name: 'Polk County E-Squad', tag: 'PCES', city: 'Lakeland, FL',
-      rideType: 'ebike', members: 38, color: 'bg-amber-400', isJoined: false, verified: false,
-      description: 'Electric everything. Long-range loops that gas bikes can\'t touch.',
-      founded: '2023'
-    },
-    {
-      id: 4, name: 'Lake Wales Skate Collective', tag: 'LWSC', city: 'Lake Wales, FL',
-      rideType: 'skates', members: 22, color: 'bg-pink-400', isJoined: false, verified: false,
-      description: 'Roller skate meetups. Beginners welcome. Monthly jams at the park.',
-      founded: '2024'
-    },
-    {
-      id: 5, name: 'Ladies Who Ride FL', tag: 'LWR', city: 'Winter Haven, FL',
-      rideType: 'bike', members: 89, color: 'bg-fuchsia-500', isJoined: true, verified: true,
-      description: 'Women-led, women-first rides across Central Florida. All levels, all welcome.',
-      founded: '2022'
-    }
-  ]);
-
-  const [shops, setShops] = useState([
-    { id: 1, name: 'Winter Haven Cycles', type: 'Bike shop', address: '3rd St SW', hours: 'Mon–Sat 10–7', specialties: ['BMX', 'Cruisers', 'Repairs'], sponsored: true, color: 'bg-pink-500' },
-    { id: 2, name: 'Circuit E-Bikes', type: 'E-bike specialist', address: 'Cypress Gardens Blvd', hours: 'Tue–Sun 11–6', specialties: ['E-Bike sales', 'Battery service'], sponsored: true, color: 'bg-amber-400' },
-    { id: 3, name: 'Lakeside Board Co.', type: 'Skate/Board', address: '1st St N', hours: 'Daily 11–8', specialties: ['Longboards', 'Roller skates'], sponsored: false, color: 'bg-blue-500' },
-    { id: 4, name: 'Chain Gang Bike Shop', type: 'Bike shop', address: 'Ave A SW', hours: 'Wed–Sun 10–6', specialties: ['Fixies', 'Road bikes', 'Repairs'], sponsored: false, color: 'bg-fuchsia-500' }
-  ]);
-
-  const [events, setEvents] = useState([
-    {
-      id: 1, title: 'Chain of Lakes Sunset Cruise', type: 'bike', host: 'Marcus T.', hostId: 2, hostVerified: true,
-      date: '2026-04-22', time: '18:30', location: 'Lake Silver Trailhead',
-      coords: { x: 35, y: 45 }, attendees: 12, distance: '8 mi', pace: 'Chill',
-      level: 'beginner', beginnerFriendly: true, crewId: 1,
-      description: 'Easy cruise around the Chain of Lakes. All skill levels welcome. Big Rippers and cruisers posting up at the end for tacos!',
-      route: [{x:35,y:45},{x:42,y:38},{x:55,y:40},{x:62,y:50},{x:58,y:62}],
-      comments: [
-        { id: 1, user: 'Sarah M.', avatar: 'bg-pink-500', text: 'So hyped for this one!', time: '2h ago' },
-        { id: 2, user: 'Marcus T.', avatar: 'bg-blue-500', text: 'Weather looking perfect 🌅', time: '1h ago' }
-      ]
-    },
-    {
-      id: 2, title: 'Skate Jam Downtown WH', type: 'skates', host: 'Jayla R.', hostId: 3, hostVerified: true,
-      date: '2026-04-23', time: '19:00', location: 'Central Park Fountain',
-      coords: { x: 60, y: 30 }, attendees: 8, distance: '5 mi', pace: 'Moderate',
-      level: 'moderate', beginnerFriendly: false, crewId: null,
-      description: 'Weekly skate meetup. Bring lights! Rolling through downtown Winter Haven and the lakefront.',
-      route: [{x:60,y:30},{x:65,y:40},{x:70,y:45},{x:68,y:55}],
-      comments: [{ id: 1, user: 'Jayla R.', avatar: 'bg-pink-500', text: "Don't forget helmets 🛼", time: '3h ago' }]
-    },
-    {
-      id: 3, title: 'Scooter Squad Morning Run', type: 'scooter', host: 'Devon K.', hostId: 4, hostVerified: false,
-      date: '2026-04-24', time: '08:00', location: 'Sweet Magnolia Coffee',
-      coords: { x: 45, y: 60 }, attendees: 5, distance: '12 mi', pace: 'Fast',
-      level: 'experienced', beginnerFriendly: false, crewId: null,
-      description: 'Early bird scooter session. Coffee first, then hitting the Fort Fraser Trail.',
-      route: [{x:45,y:60},{x:38,y:55},{x:30,y:45},{x:25,y:35}],
-      comments: []
-    },
-    {
-      id: 4, title: 'Bok Tower Longboard Tour', type: 'other', host: 'Riley P.', hostId: 6, hostVerified: false,
-      date: '2026-04-25', time: '16:00', location: 'Bok Tower Gardens',
-      coords: { x: 75, y: 55 }, attendees: 6, distance: '6 mi', pace: 'Moderate',
-      level: 'moderate', beginnerFriendly: false, crewId: null,
-      description: 'Scenic ride through Lake Wales. Helmets required!',
-      route: [{x:75,y:55},{x:70,y:48},{x:65,y:42}],
-      comments: [
-        { id: 1, user: 'Riley P.', avatar: 'bg-fuchsia-500', text: 'Bringing a speaker for tunes 🎶', time: '5h ago' },
-        { id: 2, user: 'Kim A.', avatar: 'bg-blue-400', text: 'First longboard ride, nervous lol', time: '4h ago' },
-        { id: 3, user: 'Riley P.', avatar: 'bg-fuchsia-500', text: '@Kim you got this! we\'ll go easy', time: '3h ago' }
-      ]
-    },
-    {
-      id: 5, title: 'Ladies Brunch Ride', type: 'bike', host: 'Amara S.', hostId: 5, hostVerified: true,
-      date: '2026-04-26', time: '10:00', location: 'MLK Park Pavilion',
-      coords: { x: 25, y: 70 }, attendees: 18, distance: '15 mi', pace: 'Chill',
-      level: 'beginner', beginnerFriendly: true, crewId: 5,
-      description: 'Women-led ride ending at the Winter Haven farmers market. All levels, all welcome!',
-      route: [{x:25,y:70},{x:35,y:65},{x:45,y:60},{x:55,y:55}],
-      comments: []
-    },
-    {
-      id: 6, title: 'E-Bike Lakefront Blitz', type: 'ebike', host: 'Tasha B.', hostId: 7, hostVerified: true,
-      date: '2026-04-23', time: '17:30', location: 'Lake Howard Park',
-      coords: { x: 55, y: 75 }, attendees: 14, distance: '20+ mi', pace: 'Fast',
-      level: 'experienced', beginnerFriendly: false, crewId: 3,
-      description: 'Long-range e-bike ride around the full Chain of Lakes loop. Fully charged batteries required ⚡',
-      route: [{x:55,y:75},{x:48,y:68},{x:42,y:58},{x:50,y:48},{x:62,y:52},{x:68,y:65}],
-      comments: [{ id: 1, user: 'Tasha B.', avatar: 'bg-pink-600', text: 'Charge up fam ⚡⚡', time: '1h ago' }]
-    },
-    {
-      id: 7, title: 'E-Scoot Downtown Takeover', type: 'escooter', host: 'Malik F.', hostId: 8, hostVerified: false,
-      date: '2026-04-24', time: '20:00', location: '3rd Street SW Plaza',
-      coords: { x: 68, y: 38 }, attendees: 9, distance: '8 mi', pace: 'Moderate',
-      level: 'moderate', beginnerFriendly: false, crewId: null,
-      description: 'Night ride through downtown on e-scooters. LED lights encouraged. Food truck stop after 🛴⚡',
-      route: [{x:68,y:38},{x:62,y:42},{x:55,y:48},{x:60,y:55}],
-      comments: []
-    }
-  ]);
-
-  // Post-ride feed
-  const [feedPosts, setFeedPosts] = useState([
-    {
-      id: 1, eventTitle: 'Chain of Lakes Sunset Cruise', rideType: 'bike',
-      host: 'Marcus T.', hostAvatar: 'bg-blue-500', hostVerified: true,
-      time: '3h ago', distance: '8.2 mi', duration: '1h 12m', riderCount: 14,
-      caption: 'Perfect night out. 14 deep rolling through Cypress Gardens. Next week we doing it again 🔥',
-      imageGradient: 'from-pink-500 via-orange-400 to-yellow-300', // "sunset"
-      likes: 42, liked: false,
-      comments: [
-        { user: 'Jayla R.', text: 'Wish I caught this one!' },
-        { user: 'Amara S.', text: 'Crew looked clean 🔥' }
-      ],
-      shoutouts: ['Devon K.', 'Sarah M.', 'Marcus T.']
-    },
-    {
-      id: 2, eventTitle: 'Ladies Brunch Ride', rideType: 'bike',
-      host: 'Amara S.', hostAvatar: 'bg-purple-500', hostVerified: true,
-      time: '1d ago', distance: '15.6 mi', duration: '2h 04m', riderCount: 18,
-      caption: 'Biggest Ladies ride yet! Welcoming 4 new riders — y\'all crushed it 💪 Farmers market never disappoints 🥐',
-      imageGradient: 'from-fuchsia-500 via-pink-500 to-orange-400',
-      likes: 89, liked: true,
-      comments: [
-        { user: 'Lancey', text: 'This is amazing!' },
-        { user: 'Riley P.', text: 'Legends ✨' },
-        { user: 'Tasha B.', text: 'Coming next month fr' }
-      ],
-      shoutouts: ['Amara S.', '+17 others']
-    },
-    {
-      id: 3, eventTitle: 'Bok Tower Longboard Tour', rideType: 'other',
-      host: 'Riley P.', hostAvatar: 'bg-fuchsia-500', hostVerified: false,
-      time: '2d ago', distance: '6.1 mi', duration: '48m', riderCount: 7,
-      caption: 'Kim\'s first longboard ride — smooth like butter 🛹 Bok Tower hits different on a board.',
-      imageGradient: 'from-green-500 via-emerald-400 to-teal-400',
-      likes: 31, liked: false,
-      comments: [{ user: 'Kim A.', text: 'Thank you crew, I\'m hooked 🥹' }],
-      shoutouts: ['Kim A.', 'Riley P.']
-    }
-  ]);
+  const [friends, setFriends] = useState([]);
+  const [crews, setCrews] = useState([]);
+  const [shops, setShops] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [feedPosts, setFeedPosts] = useState([]);
 
   const rideIcons = { bike: Bike, ebike: Bike, skates: Zap, scooter: Navigation, escooter: Navigation, other: Bike };
   const rideColors = { bike: 'bg-pink-500', ebike: 'bg-amber-400', skates: 'bg-blue-500', scooter: 'bg-cyan-400', escooter: 'bg-lime-400', other: 'bg-fuchsia-500' };
@@ -278,7 +121,7 @@ export default function RideoutApp() {
 
   const formatDate = (dateStr) => {
     const date = new Date(dateStr + 'T00:00:00');
-    const today = new Date('2026-04-22');
+    const today = new Date(); today.setHours(0,0,0,0);
     const diff = Math.floor((date - today) / (1000 * 60 * 60 * 24));
     if (diff === 0) return 'Today';
     if (diff === 1) return 'Tomorrow';
@@ -286,11 +129,15 @@ export default function RideoutApp() {
   };
 
   if (!onboarded) {
-    return <Onboarding profile={profile} setProfile={setProfile} step={onboardStep} setStep={setOnboardStep} onComplete={() => setOnboarded(true)} />;
+    return <Onboarding profile={profile} setProfile={setProfile} step={onboardStep} setStep={setOnboardStep} onComplete={() => {
+      setOnboarded(true);
+      try { if (!localStorage.getItem('rideoutDemoSeen')) setShowDemoTour(true); } catch (e) { setShowDemoTour(true); }
+    }} />;
   }
 
   const chatEvent = chatEventId ? events.find(e => e.id === chatEventId) : null;
-  const activeRideToday = events.find(e => e.date === '2026-04-22' && joinedEvents.includes(e.id));
+  const todayStr = new Date().toISOString().slice(0,10);
+  const activeRideToday = events.find(e => e.date === todayStr && joinedEvents.includes(e.id));
 
   return (
     <div className="w-full max-w-md mx-auto bg-zinc-950 text-white relative overflow-hidden flex flex-col" style={{height: '100dvh', WebkitTapHighlightColor: 'transparent', overscrollBehavior: 'contain'}}>
@@ -318,6 +165,10 @@ export default function RideoutApp() {
       </div>
 
       {qrShare && <QRShareModal data={qrShare} onClose={() => setQrShare(null)} />}
+      {showDemoTour && <DemoTour onClose={() => {
+        setShowDemoTour(false);
+        try { localStorage.setItem('rideoutDemoSeen', '1'); } catch (e) {}
+      }} />}
 
       {/* Active ride banner with SOS */}
       {activeRideToday && (
@@ -415,8 +266,9 @@ export default function RideoutApp() {
       {showTrustedContact && <TrustedContactModal profile={profile} setProfile={setProfile} onClose={() => setShowTrustedContact(false)} />}
       {showCreateCrew && (
         <CreateCrewModal
+          profileCity={profile.city}
           onClose={() => setShowCreateCrew(false)}
-          onCreate={(c) => { setCrews([...crews, {...c, id: crews.length + 1, isJoined: true, members: 1, verified: false, founded: '2026'}]); setShowCreateCrew(false); }}
+          onCreate={(c) => { setCrews([...crews, {...c, id: crews.length + 1, isJoined: true, members: 1, verified: false, founded: String(new Date().getFullYear())}]); setShowCreateCrew(false); }}
         />
       )}
       {showCreateEvent && (
@@ -549,17 +401,19 @@ function DiscoverScreen({ events, friendsEvents, friendIds, filterType, setFilte
             {events.length === 0 && <p className="text-center text-zinc-400 text-sm py-8">No rides match your filters.</p>}
           </div>
 
-          {/* Local shops teaser */}
-          <button onClick={onShopsClick} className="mx-4 mt-4 w-[calc(100%-2rem)] bg-gradient-to-r from-zinc-900 to-zinc-800 rounded-2xl p-4 flex items-center gap-3 border-2 border-amber-500/30">
-            <div className="bg-amber-500 w-12 h-12 rounded-xl flex items-center justify-center border-2 border-white">
-              <Store size={22} />
-            </div>
-            <div className="flex-1 text-left">
-              <p className="font-black text-sm uppercase">Local ride shops</p>
-              <p className="text-xs text-zinc-400 mt-0.5">{shops.length} partner shops near you · discounts for members</p>
-            </div>
-            <ChevronRight size={18} className="text-zinc-500" />
-          </button>
+          {/* Local shops teaser — only when we have partner shops */}
+          {shops.length > 0 && (
+            <button onClick={onShopsClick} className="mx-4 mt-4 w-[calc(100%-2rem)] bg-gradient-to-r from-zinc-900 to-zinc-800 rounded-2xl p-4 flex items-center gap-3 border-2 border-amber-500/30">
+              <div className="bg-amber-500 w-12 h-12 rounded-xl flex items-center justify-center border-2 border-white">
+                <Store size={22} />
+              </div>
+              <div className="flex-1 text-left">
+                <p className="font-black text-sm uppercase">Local ride shops</p>
+                <p className="text-xs text-zinc-400 mt-0.5">{shops.length} partner shops near you · discounts for members</p>
+              </div>
+              <ChevronRight size={18} className="text-zinc-500" />
+            </button>
+          )}
         </>
       )}
 
@@ -656,6 +510,15 @@ function CrewsScreen({ crews, onCrewClick, onCreateCrew, rideIcons, rideColors, 
         <div className="space-y-2">
           {otherCrews.map(c => <CrewCard key={c.id} crew={c} onClick={() => onCrewClick(c)} rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels} />)}
         </div>
+        {crews.length === 0 && (
+          <div className="text-center py-12">
+            <div className="w-20 h-20 rounded-2xl bg-zinc-900 border-2 border-zinc-800 flex items-center justify-center mx-auto mb-4">
+              <Users size={32} className="text-zinc-600" />
+            </div>
+            <p className="text-sm font-black uppercase tracking-wide text-zinc-300">No crews yet</p>
+            <p className="text-xs text-zinc-500 mt-1.5 max-w-[280px] mx-auto font-semibold">Be the first — tap <span className="text-pink-400">New crew</span> to start one, or check back as riders join Rideout in your area.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -768,8 +631,8 @@ function CrewDetailModal({ crew, events, onClose, onToggleJoin, onEventClick, on
   );
 }
 
-function CreateCrewModal({ onClose, onCreate }) {
-  const [form, setForm] = useState({ name: '', tag: '', city: 'Winter Haven, FL', rideType: 'bike', description: '', color: 'bg-pink-500' });
+function CreateCrewModal({ onClose, onCreate, profileCity = '' }) {
+  const [form, setForm] = useState({ name: '', tag: '', city: profileCity, rideType: 'bike', description: '', color: 'bg-pink-500' });
   const colors = ['bg-pink-500', 'bg-blue-500', 'bg-amber-400', 'bg-lime-400', 'bg-fuchsia-500', 'bg-cyan-400'];
   return (
     <div className="absolute inset-0 bg-black/80 z-50 flex items-end" onClick={onClose}>
@@ -828,6 +691,15 @@ function FeedScreen({ posts, onLike, rideColors, rideIcons }) {
       </div>
       <div className="space-y-4 px-4 pt-4">
         {posts.map(post => <FeedPostCard key={post.id} post={post} onLike={() => onLike(post.id)} rideColors={rideColors} rideIcons={rideIcons} />)}
+        {posts.length === 0 && (
+          <div className="text-center py-16">
+            <div className="w-20 h-20 rounded-2xl bg-zinc-900 border-2 border-zinc-800 flex items-center justify-center mx-auto mb-4">
+              <Rss size={32} className="text-zinc-600" />
+            </div>
+            <p className="text-sm font-black uppercase tracking-wide text-zinc-300">No recaps yet</p>
+            <p className="text-xs text-zinc-500 mt-1.5 max-w-[260px] mx-auto font-semibold">Finish a ride and post a recap to kick off the feed. Photos, stats, and shoutouts show up here.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -930,7 +802,7 @@ function ProfileScreen({ profile, setProfile, joinedEvents, friendIds, joinedCre
           <p className="text-xs text-zinc-400 uppercase font-semibold">Crews</p>
         </div>
         <div className="bg-zinc-900 rounded-xl p-3 text-center border-2 border-zinc-800">
-          <p className="text-2xl font-black text-white">186</p>
+          <p className="text-2xl font-black text-white">0</p>
           <p className="text-xs text-zinc-400 uppercase font-semibold">Miles</p>
         </div>
       </div>
@@ -1178,7 +1050,7 @@ function ShopsModal({ shops, onClose }) {
 function EventDetailModal({ event, crews, onClose, onJoin, onCheckIn, isCheckedIn, onOpenChat, onSOS, onShare, isJoined, rideIcons, rideColors, formatDate, mapView }) {
   const Icon = rideIcons[event.type];
   const crew = crews.find(c => c.id === event.crewId);
-  const isToday = event.date === '2026-04-22';
+  const isToday = event.date === new Date().toISOString().slice(0,10);
   return (
     <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end" onClick={onClose}>
       <div className="bg-zinc-950 rounded-t-3xl w-full p-5 border-t-4 border-pink-500 max-h-[92%] overflow-y-auto"
@@ -1328,7 +1200,7 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
               <p className="text-white/90 mb-6 font-semibold">We'll show you rides in your area.</p>
               <input value={profile.city} onChange={e => setProfile({...profile, city: e.target.value})} placeholder="City, State"
                 className="w-full bg-white/20 backdrop-blur rounded-2xl px-5 py-4 text-lg outline-none border-4 border-white font-bold placeholder-white/60" />
-              <p className="text-white/80 text-xs mt-3 font-semibold">🧭 STARTING YOU IN WINTER HAVEN, FL</p>
+              <p className="text-white/80 text-xs mt-3 font-semibold">🧭 We'll ask for your location to show nearby rides</p>
             </div>
           )}
           {step === 3 && (
@@ -1355,10 +1227,10 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
               <div className="w-24 h-24 bg-white rounded-full mx-auto flex items-center justify-center mb-6 border-4 border-blue-500 shadow-2xl">
                 <Sparkles size={48} className="text-pink-500" />
               </div>
-              <h2 className="text-3xl font-black mb-3 uppercase">Let's ride, {profile.name}!</h2>
-              <p className="text-white/90 text-lg mb-2 font-semibold">We found 7 rideouts and 5 crews near</p>
-              <p className="text-white font-black text-xl mb-6 uppercase">{profile.city}</p>
-              <p className="text-white/80 text-sm font-semibold">Add a trusted contact in Profile for safer rides.</p>
+              <h2 className="text-3xl font-black mb-3 uppercase">Let's ride{profile.name ? `, ${profile.name}` : ''}!</h2>
+              <p className="text-white/90 text-lg mb-2 font-semibold">You're all set up in</p>
+              <p className="text-white font-black text-xl mb-6 uppercase">{profile.city || 'your city'}</p>
+              <p className="text-white/80 text-sm font-semibold">Start a ride, join a crew, or invite friends to get rolling.</p>
             </div>
           )}
         </div>
@@ -1388,6 +1260,84 @@ function Feature({ icon, text }) {
   );
 }
 
+// ===== DEMO TOUR =====
+function DemoTour({ onClose }) {
+  const [step, setStep] = useState(0);
+  const slides = [
+    {
+      icon: Home, accent: 'from-pink-500 to-blue-500',
+      title: 'Welcome to Rideout',
+      body: 'A quick tour — or skip it if you\'d rather dive in. Rideout helps you find rides, build crews, and ride safer.'
+    },
+    {
+      icon: MapPin, accent: 'from-pink-500 to-fuchsia-500',
+      title: 'Discover rides',
+      body: 'The map shows rideouts near you. Tap a pin or scroll the list to see details. Filter by ride type, skill level, or beginner-friendly.'
+    },
+    {
+      icon: Users, accent: 'from-blue-500 to-cyan-400',
+      title: 'Join a crew',
+      body: 'Crews are your regular ride group — weekly rides, private chat, shared calendar. Join one or start your own from the Crews tab.'
+    },
+    {
+      icon: Plus, accent: 'from-pink-500 to-blue-500',
+      title: 'Host a ride',
+      body: 'Tap the big + button from any screen to create a rideout. Set a route, pick a ride type, and invite your crew.'
+    },
+    {
+      icon: Rss, accent: 'from-fuchsia-500 to-pink-500',
+      title: 'Share the recap',
+      body: 'After each ride, post photos and stats to the Feed. Tag riders, get likes, and keep the crew hyped for next time.'
+    },
+    {
+      icon: ShieldCheck, accent: 'from-green-500 to-blue-500',
+      title: 'Ride safer',
+      body: 'Add a trusted contact and practice the SOS button from your Profile. Both live at the top of the Profile screen.'
+    }
+  ];
+  const cur = slides[step];
+  const Icon = cur.icon;
+  const isLast = step === slides.length - 1;
+  return (
+    <div className="absolute inset-0 z-[100] bg-zinc-950/95 backdrop-blur-sm flex flex-col p-6" style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)', paddingBottom: 'max(env(safe-area-inset-bottom), 1.5rem)'}}>
+      <div className="flex justify-between items-center mb-4">
+        <span className="text-xs font-black uppercase tracking-widest text-zinc-500">Tour · {step + 1} / {slides.length}</span>
+        <button onClick={onClose} className="text-xs font-black uppercase text-zinc-400 border border-zinc-700 rounded-full px-3 py-1.5 active:scale-95">Skip tour</button>
+      </div>
+      <div className="flex-1 flex flex-col justify-center">
+        <div className={`bg-gradient-to-br ${cur.accent} rounded-3xl p-6 border-4 border-white/10 shadow-2xl`}>
+          <div className="w-16 h-16 rounded-2xl bg-white/20 backdrop-blur border-2 border-white flex items-center justify-center mb-4">
+            <Icon size={32} className="text-white" />
+          </div>
+          <h2 className="text-2xl font-black uppercase text-white mb-2 leading-tight">{cur.title}</h2>
+          <p className="text-white/90 text-sm font-semibold leading-relaxed">{cur.body}</p>
+        </div>
+        <CheckeredStrip color1="#ec4899" color2="#ffffff" className="mt-4 rounded-full overflow-hidden" />
+      </div>
+      <div className="pt-4">
+        <div className="flex gap-1.5 mb-4 justify-center">
+          {slides.map((_, i) => (
+            <div key={i} className={`h-2 rounded-full transition-all border border-white/40 ${i === step ? 'w-8 bg-pink-500' : 'w-2 bg-zinc-700'}`} />
+          ))}
+        </div>
+        <div className="flex gap-2">
+          {step > 0 && (
+            <button onClick={() => setStep(step - 1)} className="bg-zinc-800 text-white font-black py-3 px-5 rounded-2xl flex items-center gap-1 uppercase text-sm border-2 border-zinc-700 active:scale-95">
+              <ArrowLeft size={16} />Back
+            </button>
+          )}
+          <button onClick={() => isLast ? onClose() : setStep(step + 1)}
+            className="flex-1 bg-gradient-to-r from-pink-500 to-blue-500 text-white font-black py-3 rounded-2xl flex items-center justify-center gap-2 uppercase tracking-wide border-2 border-white shadow-xl active:scale-95">
+            {isLast ? "Let's ride" : 'Next'}
+            <ArrowRight size={18} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Stylized fallback background used inside modals where an interactive real map is overkill
 function MapBackground({ mapView }) {
   if (mapView === 'satellite') {
     return (
@@ -1395,14 +1345,6 @@ function MapBackground({ mapView }) {
         <div className="absolute inset-0" style={{backgroundImage: `radial-gradient(circle at 20% 30%, rgba(74,124,89,0.6) 0%, transparent 30%), radial-gradient(circle at 70% 20%, rgba(45,85,55,0.7) 0%, transparent 35%), radial-gradient(circle at 40% 70%, rgba(90,135,100,0.5) 0%, transparent 40%), radial-gradient(circle at 85% 65%, rgba(55,95,70,0.8) 0%, transparent 30%), radial-gradient(circle at 15% 85%, rgba(30,75,45,0.7) 0%, transparent 35%)`}} />
         <div className="absolute w-20 h-14 bg-blue-900/60 rounded-full blur-sm" style={{top: '35%', left: '40%'}} />
         <div className="absolute w-16 h-12 bg-blue-900/60 rounded-full blur-sm" style={{top: '55%', left: '25%'}} />
-        <div className="absolute w-14 h-10 bg-blue-900/60 rounded-full blur-sm" style={{top: '25%', left: '65%'}} />
-        <div className="absolute w-12 h-16 bg-blue-900/60 rounded-full blur-sm" style={{top: '60%', left: '65%'}} />
-        <svg className="absolute inset-0 w-full h-full opacity-40">
-          <line x1="0" y1="50%" x2="100%" y2="45%" stroke="rgba(200,180,130,0.6)" strokeWidth="2" />
-          <line x1="50%" y1="0" x2="45%" y2="100%" stroke="rgba(200,180,130,0.6)" strokeWidth="2" />
-          <line x1="0" y1="20%" x2="100%" y2="25%" stroke="rgba(200,180,130,0.4)" strokeWidth="1.5" />
-          <line x1="30%" y1="0" x2="35%" y2="100%" stroke="rgba(200,180,130,0.4)" strokeWidth="1.5" />
-        </svg>
       </>
     );
   }
@@ -1414,39 +1356,135 @@ function MapBackground({ mapView }) {
   );
 }
 
+// Tile URLs by map style
+const MAP_TILES = {
+  street: {
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a>'
+  },
+  satellite: {
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Tiles &copy; Esri'
+  }
+};
+
+// Ride-type accent colors used for pins and routes
+const PIN_COLORS = {
+  bike: '#ec4899', ebike: '#f59e0b', skates: '#3b82f6',
+  scooter: '#22d3ee', escooter: '#a3e635', other: '#d946ef'
+};
+
+// Event coords in this app are stored as { x, y } percentages (legacy).
+// For real-map rendering we anchor them around a center point and scale to a small bbox.
+function coordsToLatLng(coords, center) {
+  if (!coords) return center;
+  // ~0.05° = ~5km N/S, 0.07° ~= ~7km E/W at this latitude
+  const latSpread = 0.05;
+  const lngSpread = 0.07;
+  const lat = center[0] + (50 - coords.y) / 50 * (latSpread / 2);
+  const lng = center[1] + (coords.x - 50) / 50 * (lngSpread / 2);
+  return [lat, lng];
+}
+
 function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventClick, showRoutes, location }) {
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+  const tileLayerRef = useRef(null);
+  const markerLayerRef = useRef(null);
+  const [center, setCenter] = useState([28.0222, -81.7328]); // Winter Haven, FL default
+  const [ready, setReady] = useState(false);
+
+  // Try geolocation once on mount
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setCenter([pos.coords.latitude, pos.coords.longitude]),
+      () => { /* silent fallback to default */ },
+      { timeout: 5000, maximumAge: 300000 }
+    );
+  }, []);
+
+  // Initialize Leaflet map once
+  useEffect(() => {
+    if (!window.L || !containerRef.current || mapRef.current) return;
+    const L = window.L;
+    const map = L.map(containerRef.current, {
+      center, zoom: 13, zoomControl: false, attributionControl: true
+    });
+    const tiles = MAP_TILES[mapView] || MAP_TILES.street;
+    tileLayerRef.current = L.tileLayer(tiles.url, { attribution: tiles.attribution, maxZoom: 19 }).addTo(map);
+    markerLayerRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    setReady(true);
+    // Ensure map redraws after container sizes settle
+    setTimeout(() => map.invalidateSize(), 100);
+    return () => { map.remove(); mapRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Recenter when geolocation resolves
+  useEffect(() => {
+    if (mapRef.current) mapRef.current.setView(center, mapRef.current.getZoom());
+  }, [center]);
+
+  // Swap tiles on street/satellite toggle
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    if (tileLayerRef.current) mapRef.current.removeLayer(tileLayerRef.current);
+    const tiles = MAP_TILES[mapView] || MAP_TILES.street;
+    tileLayerRef.current = window.L.tileLayer(tiles.url, { attribution: tiles.attribution, maxZoom: 19 }).addTo(mapRef.current);
+  }, [mapView]);
+
+  // Render markers + routes whenever events change
+  useEffect(() => {
+    if (!mapRef.current || !window.L || !markerLayerRef.current) return;
+    const L = window.L;
+    markerLayerRef.current.clearLayers();
+
+    events.forEach(event => {
+      const latlng = coordsToLatLng(event.coords, center);
+      const color = PIN_COLORS[event.type] || '#ec4899';
+
+      // Custom pin icon as DivIcon
+      const pinHtml = `
+        <div style="
+          width:36px;height:36px;border-radius:50%;
+          background:${color};border:3px solid #fff;
+          box-shadow:0 4px 10px rgba(0,0,0,0.3);
+          display:flex;align-items:center;justify-content:center;
+          color:#fff;font-weight:900;font-size:14px;">${event.type[0].toUpperCase()}</div>`;
+      const icon = L.divIcon({
+        html: pinHtml, className: '', iconSize: [36,36], iconAnchor: [18,18]
+      });
+      const marker = L.marker(latlng, { icon }).addTo(markerLayerRef.current);
+      marker.on('click', () => onEventClick(event));
+
+      // Route polyline
+      if (showRoutes && event.route && event.route.length > 1) {
+        const routeLatLngs = event.route.map(p => coordsToLatLng(p, center));
+        L.polyline(routeLatLngs, {
+          color, weight: 4, opacity: 0.75, dashArray: '6 6'
+        }).addTo(markerLayerRef.current);
+      }
+    });
+
+    // User "you are here" marker
+    const youHtml = `
+      <div style="position:relative;width:22px;height:22px;">
+        <div style="position:absolute;inset:0;border-radius:50%;background:rgba(59,130,246,0.25);animation:pulse 1.8s infinite;"></div>
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;background:#3b82f6;border:2px solid #fff;"></div>
+      </div>`;
+    const youIcon = L.divIcon({ html: youHtml, className: '', iconSize: [22,22], iconAnchor: [11,11] });
+    L.marker(center, { icon: youIcon, interactive: false }).addTo(markerLayerRef.current);
+  }, [events, center, showRoutes, onEventClick, ready]);
+
   return (
-    <div className={`relative h-56 overflow-hidden border-b-2 border-pink-500/30 ${mapView === 'satellite' ? 'bg-gradient-to-br from-green-900 via-emerald-800 to-green-900' : 'bg-gradient-to-br from-zinc-800 via-zinc-700 to-zinc-800'}`}>
-      <MapBackground mapView={mapView} />
-      {showRoutes && (
-        <svg className="absolute inset-0 w-full h-full" style={{zIndex: 1}} viewBox="0 0 100 100" preserveAspectRatio="none">
-          {events.map(event => event.route && event.route.length > 1 && (
-            <polyline key={event.id} points={event.route.map(p => `${p.x},${p.y}`).join(' ')} fill="none"
-              stroke={event.type === 'bike' ? 'rgba(236,72,153,0.7)' : event.type === 'ebike' ? 'rgba(251,191,36,0.7)' : event.type === 'skates' ? 'rgba(59,130,246,0.7)' : event.type === 'scooter' ? 'rgba(34,211,238,0.7)' : event.type === 'escooter' ? 'rgba(163,230,53,0.7)' : 'rgba(217,70,239,0.7)'}
-              strokeWidth="0.8" strokeDasharray="1.5,1" vectorEffect="non-scaling-stroke" />
-          ))}
-        </svg>
-      )}
-      {events.map(event => {
-        const Icon = rideIcons[event.type];
-        return (
-          <button key={event.id} onClick={() => onEventClick(event)} className="absolute transform -translate-x-1/2 -translate-y-1/2" style={{left: `${event.coords.x}%`, top: `${event.coords.y}%`, zIndex: 10}}>
-            <div className={`${rideColors[event.type]} w-10 h-10 rounded-full flex items-center justify-center shadow-lg border-2 border-white animate-pulse`}>
-              <Icon size={18} className="text-white" />
-            </div>
-          </button>
-        );
-      })}
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" style={{zIndex: 5}}>
-        <div className="relative">
-          <div className="absolute inset-0 w-16 h-16 -translate-x-1/2 -translate-y-1/2 left-1/2 top-1/2 rounded-full bg-blue-500/20 animate-ping" />
-          <div className="w-4 h-4 bg-blue-500 rounded-full border-2 border-white shadow-lg" />
-        </div>
+    <div className="relative h-56 overflow-hidden border-b-2 border-pink-500/30 bg-zinc-900">
+      <div ref={containerRef} className="absolute inset-0" style={{zIndex: 1}} />
+      <div className="absolute top-3 left-3 bg-zinc-950/90 backdrop-blur px-3 py-1.5 rounded-full text-xs font-black flex items-center gap-1.5 z-[500] border border-pink-500/40 uppercase pointer-events-none">
+        <MapPin size={12} className="text-pink-500" />{location || 'Your area'}
       </div>
-      <div className="absolute top-3 left-3 bg-zinc-950/90 backdrop-blur px-3 py-1.5 rounded-full text-xs font-black flex items-center gap-1.5 z-20 border border-pink-500/40 uppercase">
-        <MapPin size={12} className="text-pink-500" />{location}
-      </div>
-      <button onClick={() => setMapView(mapView === 'street' ? 'satellite' : 'street')} className="absolute top-3 right-3 bg-zinc-950/90 backdrop-blur px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 z-20 border border-blue-500/40 uppercase">
+      <button onClick={() => setMapView(mapView === 'street' ? 'satellite' : 'street')} className="absolute top-3 right-3 bg-zinc-950/90 backdrop-blur px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 z-[500] border border-blue-500/40 uppercase text-white">
         <Layers size={12} />{mapView === 'street' ? 'Satellite' : 'Street'}
       </button>
     </div>
@@ -1543,6 +1581,13 @@ function FriendsModal({ friends, onToggle, onClose }) {
             </button>
           </div>
         ))}
+        {filtered.length === 0 && (
+          <div className="text-center py-12">
+            <UserPlus size={36} className="mx-auto text-zinc-600 mb-3" />
+            <p className="text-sm font-black uppercase text-zinc-300">{tab === 'crew' ? "You're not following anyone yet" : 'No riders to suggest yet'}</p>
+            <p className="text-xs text-zinc-500 mt-1.5 max-w-[260px] mx-auto font-semibold">Share your invite link or join a rideout to connect with other riders.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1550,8 +1595,13 @@ function FriendsModal({ friends, onToggle, onClose }) {
 
 // ===== CREATE EVENT =====
 function CreateEventModal({ profileName, crews, onClose, onCreate, showRouteBuilder, setShowRouteBuilder, mapView }) {
+  // Default date = tomorrow
+  const defaultDate = (() => {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    return d.toISOString().slice(0, 10);
+  })();
   const [form, setForm] = useState({
-    title: '', type: 'bike', date: '2026-04-23', time: '18:00', location: '',
+    title: '', type: 'bike', date: defaultDate, time: '18:00', location: '',
     distance: '5 mi', pace: 'Chill', description: '', host: profileName,
     attendees: 1, route: [], level: 'moderate', beginnerFriendly: false, crewId: null
   });
