@@ -2475,16 +2475,38 @@ const PIN_COLORS = {
   scooter: '#22d3ee', escooter: '#a3e635', other: '#d946ef'
 };
 
-// Event coords in this app are stored as { x, y } percentages (legacy).
-// For real-map rendering we anchor them around a center point and scale to a small bbox.
+// Event coords can be in two formats:
+//   • { lat, lng } — real geographic coords from Supabase / device GPS
+//   • { x, y }     — legacy percentage coords (0-100) relative to the screen
+// For real-map rendering we need [lat, lng]. This helper handles both, and
+// returns null for any invalid input so callers can skip instead of crashing
+// Leaflet with NaN coords.
 function coordsToLatLng(coords, center) {
-  if (!coords) return center;
-  // ~0.05° = ~5km N/S, 0.07° ~= ~7km E/W at this latitude
-  const latSpread = 0.05;
-  const lngSpread = 0.07;
-  const lat = center[0] + (50 - coords.y) / 50 * (latSpread / 2);
-  const lng = center[1] + (coords.x - 50) / 50 * (lngSpread / 2);
-  return [lat, lng];
+  const fallback = (Array.isArray(center) && isFinite(center[0]) && isFinite(center[1]))
+    ? center
+    : null;
+  if (!coords || typeof coords !== 'object') return fallback;
+
+  // Real geographic coords.
+  if (isFinite(coords.lat) && isFinite(coords.lng)) {
+    return [coords.lat, coords.lng];
+  }
+
+  // Legacy percentage coords — anchor around center + scale to a small bbox.
+  if (fallback && isFinite(coords.x) && isFinite(coords.y)) {
+    const latSpread = 0.05;
+    const lngSpread = 0.07;
+    const lat = fallback[0] + (50 - coords.y) / 50 * (latSpread / 2);
+    const lng = fallback[1] + (coords.x - 50) / 50 * (lngSpread / 2);
+    if (isFinite(lat) && isFinite(lng)) return [lat, lng];
+  }
+
+  return fallback;
+}
+
+// Any [lat, lng] pair is valid iff both are finite numbers.
+function isValidLatLng(ll) {
+  return Array.isArray(ll) && ll.length === 2 && isFinite(ll[0]) && isFinite(ll[1]);
 }
 
 function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventClick, showRoutes, location, profileCoords }) {
@@ -2492,22 +2514,31 @@ function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventCl
   const mapRef = useRef(null);
   const tileLayerRef = useRef(null);
   const markerLayerRef = useRef(null);
-  const [center, setCenter] = useState(
-    profileCoords ? [profileCoords.lat, profileCoords.lng] : [28.0222, -81.7328]
-  );
+  // Default center (Lakeland, FL — change if you want a different fallback).
+  const DEFAULT_CENTER = [28.0222, -81.7328];
+  const validProfileCenter = profileCoords && isFinite(profileCoords.lat) && isFinite(profileCoords.lng)
+    ? [profileCoords.lat, profileCoords.lng]
+    : null;
+  const [center, setCenter] = useState(validProfileCenter || DEFAULT_CENTER);
   const [ready, setReady] = useState(false);
 
-  // Keep map centered on the saved profile coords if they exist
+  // Keep map centered on the saved profile coords if they exist AND are valid.
   useEffect(() => {
-    if (profileCoords) setCenter([profileCoords.lat, profileCoords.lng]);
+    if (profileCoords && isFinite(profileCoords.lat) && isFinite(profileCoords.lng)) {
+      setCenter([profileCoords.lat, profileCoords.lng]);
+    }
   }, [profileCoords]);
 
   // If we don't have saved coords, try geolocation once on mount
   useEffect(() => {
-    if (profileCoords) return; // saved coords win
+    if (validProfileCenter) return; // saved coords win
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition(
-      (pos) => setCenter([pos.coords.latitude, pos.coords.longitude]),
+      (pos) => {
+        const lat = pos && pos.coords && pos.coords.latitude;
+        const lng = pos && pos.coords && pos.coords.longitude;
+        if (isFinite(lat) && isFinite(lng)) setCenter([lat, lng]);
+      },
       () => { /* silent fallback to default */ },
       { timeout: 5000, maximumAge: 300000 }
     );
@@ -2553,7 +2584,11 @@ function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventCl
 
     events.forEach(event => {
       const latlng = coordsToLatLng(event.coords, center);
-      const color = PIN_COLORS[event.type] || '#ec4899';
+      // Skip events without valid coords — otherwise Leaflet crashes on NaN.
+      if (!isValidLatLng(latlng)) return;
+      const type = event.type || 'bike';
+      const color = PIN_COLORS[type] || '#ec4899';
+      const label = (type[0] || 'B').toUpperCase();
 
       // Custom pin icon as DivIcon
       const pinHtml = `
@@ -2562,30 +2597,36 @@ function MapView({ mapView, setMapView, events, rideIcons, rideColors, onEventCl
           background:${color};border:3px solid #fff;
           box-shadow:0 4px 10px rgba(0,0,0,0.3);
           display:flex;align-items:center;justify-content:center;
-          color:#fff;font-weight:900;font-size:14px;">${event.type[0].toUpperCase()}</div>`;
+          color:#fff;font-weight:900;font-size:14px;">${label}</div>`;
       const icon = L.divIcon({
         html: pinHtml, className: '', iconSize: [36,36], iconAnchor: [18,18]
       });
       const marker = L.marker(latlng, { icon }).addTo(markerLayerRef.current);
       marker.on('click', () => onEventClick(event));
 
-      // Route polyline
-      if (showRoutes && event.route && event.route.length > 1) {
-        const routeLatLngs = event.route.map(p => coordsToLatLng(p, center));
-        L.polyline(routeLatLngs, {
-          color, weight: 4, opacity: 0.75, dashArray: '6 6'
-        }).addTo(markerLayerRef.current);
+      // Route polyline — only include valid points.
+      if (showRoutes && Array.isArray(event.route) && event.route.length > 1) {
+        const routeLatLngs = event.route
+          .map(p => coordsToLatLng(p, center))
+          .filter(isValidLatLng);
+        if (routeLatLngs.length > 1) {
+          L.polyline(routeLatLngs, {
+            color, weight: 4, opacity: 0.75, dashArray: '6 6'
+          }).addTo(markerLayerRef.current);
+        }
       }
     });
 
-    // User "you are here" marker
-    const youHtml = `
-      <div style="position:relative;width:22px;height:22px;">
-        <div style="position:absolute;inset:0;border-radius:50%;background:rgba(59,130,246,0.25);animation:pulse 1.8s infinite;"></div>
-        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;background:#3b82f6;border:2px solid #fff;"></div>
-      </div>`;
-    const youIcon = L.divIcon({ html: youHtml, className: '', iconSize: [22,22], iconAnchor: [11,11] });
-    L.marker(center, { icon: youIcon, interactive: false }).addTo(markerLayerRef.current);
+    // User "you are here" marker — only if center is valid.
+    if (isValidLatLng(center)) {
+      const youHtml = `
+        <div style="position:relative;width:22px;height:22px;">
+          <div style="position:absolute;inset:0;border-radius:50%;background:rgba(59,130,246,0.25);animation:pulse 1.8s infinite;"></div>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;background:#3b82f6;border:2px solid #fff;"></div>
+        </div>`;
+      const youIcon = L.divIcon({ html: youHtml, className: '', iconSize: [22,22], iconAnchor: [11,11] });
+      L.marker(center, { icon: youIcon, interactive: false }).addTo(markerLayerRef.current);
+    }
   }, [events, center, showRoutes, onEventClick, ready]);
 
   return (
@@ -3222,6 +3263,9 @@ function GuardianMap({ riders, positions, onSelect, selectedCode }) {
     riders.forEach(r => {
       const p = positions[r.code];
       if (!p || !p.coords) return;
+      const lat = p.coords.lat, lng = p.coords.lng;
+      // Skip positions with missing / bad coords so Leaflet doesn't crash.
+      if (!isFinite(lat) || !isFinite(lng)) return;
       const isSelected = r.code === selectedCode;
       const ring = isSelected ? '#fef3c7' : '#ffffff';
       const body = isSelected ? '#f59e0b' : '#ec4899';
@@ -3231,9 +3275,9 @@ function GuardianMap({ riders, positions, onSelect, selectedCode }) {
           <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;background:${body};border:3px solid ${ring};box-shadow:0 4px 10px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:11px;font-family:ui-monospace,monospace;">${(r.name||'?').charAt(0).toUpperCase()}</div>
         </div>`;
       const icon = L.divIcon({ html, className: '', iconSize: [44, 44], iconAnchor: [22, 22] });
-      const marker = L.marker([p.coords.lat, p.coords.lng], { icon }).addTo(markerLayerRef.current);
+      const marker = L.marker([lat, lng], { icon }).addTo(markerLayerRef.current);
       marker.on('click', () => onSelect(r.code));
-      pts.push([p.coords.lat, p.coords.lng]);
+      pts.push([lat, lng]);
     });
     if (pts.length === 1) {
       mapRef.current.setView(pts[0], 14);
