@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MapPin, Calendar, Users, Plus, Bike, Zap, Navigation, Clock, ChevronRight, User, Home, X, Check, Search, Filter, Heart, MessageCircle, Send, UserPlus, UserCheck, Layers, Route, Trash2, ArrowRight, ArrowLeft, Sparkles, Flame, Shield, BadgeCheck, Store, Camera, AlertTriangle, Flag, Image, Rss, Phone, ShieldCheck, Crown, Star, QrCode, Share2, Copy, Upload, LocateFixed, RefreshCw, Radio, Bell, BellRing, Eye } from 'lucide-react';
+import {
+  supabaseReady,
+  upsertRider,
+  fetchRider,
+  subscribeRider,
+  sendPageRemote,
+  ackPage,
+  fetchLatestUnackedPage,
+  subscribePages,
+} from './lib/supabase';
 
 // Random 6-char rider code for guardian linking (no confusing chars)
 function generateRiderCode() {
@@ -9,8 +19,9 @@ function generateRiderCode() {
   return out;
 }
 
-// Send a page from a guardian to a rider (writes to localStorage; storage event
-// fires in the rider's tab/device if same-origin). Returns the message object.
+// Send a page from a guardian to a rider.
+// Primary path: Supabase `pages` table — delivers across devices in real time.
+// Fallback path: localStorage (same-origin only) so the app still works offline.
 function sendPage(riderCode, fromName, fromPhone, msg) {
   const data = {
     at: Date.now(),
@@ -19,6 +30,10 @@ function sendPage(riderCode, fromName, fromPhone, msg) {
     msg: msg || 'Check in with me.'
   };
   try { localStorage.setItem(`rideout_page_${riderCode}`, JSON.stringify(data)); } catch (e) {}
+  if (supabaseReady) {
+    sendPageRemote({ riderCode, fromName: data.from, fromPhone: data.phone, message: data.msg })
+      .catch(() => { /* fallback already wrote localStorage */ });
+  }
   return data;
 }
 
@@ -120,23 +135,60 @@ export default function RideoutApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.role]);
 
-  // Rider listens for incoming pages (localStorage across tabs/devices-same-origin)
+  // Rider listens for incoming pages. Real-time delivery via Supabase; falls back
+  // to localStorage (same-origin only) when Supabase env vars aren't set.
+  const pendingPageIdRef = useRef(null);
   useEffect(() => {
     if (profile.role !== 'rider' || !profile.riderCode) return;
-    const key = `rideout_page_${profile.riderCode}`;
+    const code = profile.riderCode;
+
+    // --- Fallback: localStorage cross-tab listener ---
+    const key = `rideout_page_${code}`;
     const readAndMaybeShow = (raw) => {
       if (!raw) return;
       try {
         const data = JSON.parse(raw);
         if (!data || data.ack) return;
-        if (Date.now() - data.at > 24 * 60 * 60 * 1000) return; // ignore stale pages
-        setPendingPage(data);
-      } catch (e) { /* ignore */ }
+        if (Date.now() - data.at > 24 * 60 * 60 * 1000) return;
+        setPendingPage((prev) => prev || data);
+      } catch (e) {}
     };
     try { readAndMaybeShow(localStorage.getItem(key)); } catch (e) {}
-    const handler = (e) => { if (e.key === key) readAndMaybeShow(e.newValue); };
-    window.addEventListener('storage', handler);
-    return () => window.removeEventListener('storage', handler);
+    const storageHandler = (e) => { if (e.key === key) readAndMaybeShow(e.newValue); };
+    window.addEventListener('storage', storageHandler);
+
+    // --- Primary: Supabase realtime ---
+    let unsub = () => {};
+    if (supabaseReady) {
+      // Show any existing un-acked page on mount (e.g. rider was offline when paged).
+      fetchLatestUnackedPage(code).then((row) => {
+        if (!row) return;
+        pendingPageIdRef.current = row.id;
+        setPendingPage({
+          at: new Date(row.sent_at).getTime(),
+          from: row.from_name || 'Your guardian',
+          phone: row.from_phone || '',
+          msg: row.message || 'Check in with me.',
+          _id: row.id,
+        });
+      });
+      unsub = subscribePages(code, (row) => {
+        if (!row || row.ack) return;
+        pendingPageIdRef.current = row.id;
+        setPendingPage({
+          at: new Date(row.sent_at).getTime(),
+          from: row.from_name || 'Your guardian',
+          phone: row.from_phone || '',
+          msg: row.message || 'Check in with me.',
+          _id: row.id,
+        });
+      });
+    }
+
+    return () => {
+      window.removeEventListener('storage', storageHandler);
+      unsub();
+    };
   }, [profile.role, profile.riderCode]);
 
   const dismissPage = () => {
@@ -150,6 +202,9 @@ export default function RideoutApp() {
         }
       }
     } catch (e) {}
+    const id = pendingPageIdRef.current;
+    pendingPageIdRef.current = null;
+    if (supabaseReady && id) ackPage(id).catch(() => {});
     setPendingPage(null);
   };
 
@@ -166,20 +221,30 @@ export default function RideoutApp() {
   };
 
   // Rider broadcasts their location so guardians can see them on the map.
-  // Writes to localStorage key rideout_rider_<CODE> and keeps it fresh with watchPosition.
+  // Primary: upserts into Supabase `riders` row. Fallback: localStorage (same-origin).
   useEffect(() => {
     if (profile.role !== 'rider' || !profile.riderCode) return;
     const key = `rideout_rider_${profile.riderCode}`;
     const writePos = (lat, lng, speed) => {
+      const spd = typeof speed === 'number' && !isNaN(speed) ? speed : null;
       try {
         localStorage.setItem(key, JSON.stringify({
           code: profile.riderCode,
           name: profile.name || 'Rider',
           coords: { lat, lng },
-          speed: typeof speed === 'number' && !isNaN(speed) ? speed : null,
+          speed: spd,
           at: Date.now()
         }));
       } catch (e) {}
+      if (supabaseReady) {
+        upsertRider({
+          code: profile.riderCode,
+          name: profile.name || 'Rider',
+          avatar: profile.avatar || null,
+          coords: { lat, lng },
+          speed: spd,
+        }).catch(() => {});
+      }
     };
     // Seed immediately from saved coords so the guardian sees *something* even offline.
     if (profile.coords) writePos(profile.coords.lat, profile.coords.lng, null);
@@ -194,7 +259,7 @@ export default function RideoutApp() {
       } catch (e) {}
     }
     return () => { if (watchId != null && navigator.geolocation) navigator.geolocation.clearWatch(watchId); };
-  }, [profile.role, profile.riderCode, profile.name, profile.coords]);
+  }, [profile.role, profile.riderCode, profile.name, profile.avatar, profile.coords]);
   const [showDemoTour, setShowDemoTour] = useState(false);
   const [activeTab, setActiveTab] = useState('discover');
   const [discoverSegment, setDiscoverSegment] = useState('rides'); // rides | calendar
@@ -2294,26 +2359,74 @@ function GuardianHome({ profile, setProfile, onSwitchRole }) {
   const [switchToRider, setSwitchToRider] = useState(false);
   const linkedRiders = profile.linkedRiders || [];
 
-  // Poll localStorage for each linked rider's last-known position every 4s.
+  // Live positions for each linked rider.
+  // Primary: Supabase realtime subscription (one channel per rider_code) +
+  // initial fetchRider() to warm up the map on mount.
+  // Fallback: localStorage poll (same-origin only) for offline/single-device testing.
   useEffect(() => {
-    const read = () => {
-      const next = {};
-      linkedRiders.forEach(r => {
-        try {
-          const raw = localStorage.getItem(`rideout_rider_${r.code}`);
-          if (raw) next[r.code] = JSON.parse(raw);
-        } catch (e) {}
+    const readLocal = () => {
+      setPositions((prev) => {
+        const next = { ...prev };
+        linkedRiders.forEach(r => {
+          try {
+            const raw = localStorage.getItem(`rideout_rider_${r.code}`);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              // Don't let stale localStorage overwrite a fresher Supabase value.
+              const cur = next[r.code];
+              if (!cur || (parsed.at || 0) > (cur.at || 0)) next[r.code] = parsed;
+            }
+          } catch (e) {}
+        });
+        return next;
       });
-      setPositions(next);
     };
-    read();
-    const id = setInterval(read, 4000);
-    const handler = (e) => {
-      if (e.key && e.key.startsWith('rideout_rider_')) read();
-    };
+    readLocal();
+    const id = setInterval(readLocal, 4000);
+    const handler = (e) => { if (e.key && e.key.startsWith('rideout_rider_')) readLocal(); };
     window.addEventListener('storage', handler);
-    return () => { clearInterval(id); window.removeEventListener('storage', handler); };
-  }, [linkedRiders.length]);
+
+    // Supabase: initial fetch + realtime row change subscription per code.
+    const unsubs = [];
+    if (supabaseReady) {
+      linkedRiders.forEach((r) => {
+        fetchRider(r.code).then((row) => {
+          if (!row || row.last_lat == null || row.last_lng == null) return;
+          setPositions((prev) => ({
+            ...prev,
+            [r.code]: {
+              code: r.code,
+              name: row.name || r.name,
+              coords: { lat: row.last_lat, lng: row.last_lng },
+              speed: row.last_speed,
+              at: row.last_seen_at ? new Date(row.last_seen_at).getTime() : Date.now(),
+            },
+          }));
+        });
+        const unsub = subscribeRider(r.code, (row) => {
+          if (!row || row.last_lat == null || row.last_lng == null) return;
+          setPositions((prev) => ({
+            ...prev,
+            [r.code]: {
+              code: r.code,
+              name: row.name || r.name,
+              coords: { lat: row.last_lat, lng: row.last_lng },
+              speed: row.last_speed,
+              at: row.last_seen_at ? new Date(row.last_seen_at).getTime() : Date.now(),
+            },
+          }));
+        });
+        unsubs.push(unsub);
+      });
+    }
+
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('storage', handler);
+      unsubs.forEach((u) => { try { u(); } catch (e) {} });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedRiders.map(r => r.code).join(',')]);
 
   const linkRider = (code, name) => {
     const clean = (code || '').toUpperCase().trim();
