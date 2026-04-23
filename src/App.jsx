@@ -51,6 +51,68 @@ function sendPage(riderCode, fromName, fromPhone, msg) {
   return data;
 }
 
+// ---- Rideout alarm helpers ------------------------------------------------
+
+// Parse an event's date + time strings into epoch millis. Returns null if unparseable.
+// date: "YYYY-MM-DD". time: "HH:MM" (24-hour, from <input type="time">).
+// If time is missing we assume 09:00 local so the alarm still fires.
+function parseEventStartMs(date, time) {
+  if (!date || typeof date !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return null;
+  const y = +m[1], mo = +m[2] - 1, d = +m[3];
+  let hh = 9, mm = 0;
+  if (time && typeof time === 'string') {
+    // Accept both "18:30" and "6:30 PM" just in case.
+    const t24 = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+    const t12 = /^(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]\.?$/.exec(time.trim());
+    if (t24) { hh = +t24[1]; mm = +t24[2]; }
+    else if (t12) {
+      hh = +t12[1] % 12;
+      mm = +t12[2];
+      if (/p/i.test(t12[3])) hh += 12;
+    }
+  }
+  const dt = new Date(y, mo, d, hh, mm, 0, 0);
+  const ms = dt.getTime();
+  return isNaN(ms) ? null : ms;
+}
+
+// Short two-beep alarm using the Web Audio API (no asset needed).
+function fireAlarmBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const beep = (at, freq) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + 0.28);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(ctx.currentTime + at);
+      osc.stop(ctx.currentTime + at + 0.3);
+    };
+    beep(0, 880);
+    beep(0.35, 988);
+    setTimeout(() => { try { ctx.close(); } catch (e) {} }, 1200);
+  } catch (e) { /* ignore — audio is best-effort */ }
+}
+
+// Fire a browser notification if the user granted permission.
+function tryBrowserNotification(ev) {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const mins = Math.max(1, Math.round((parseEventStartMs(ev.date, ev.time) - Date.now()) / 60000));
+    const title = `Rideout starting in ~${mins} min`;
+    const body = `${ev.title || 'Ride'}${ev.location ? ' · ' + ev.location : ''}`;
+    new Notification(title, { body, icon: '/icon-192.png', tag: `ride-${ev.id}` });
+  } catch (e) { /* ignore */ }
+}
+
 // Tiny persistence wrapper. Same API as useState, but reads/writes localStorage.
 function useLocalState(key, defaultValue) {
   const [value, setValue] = useState(() => {
@@ -362,6 +424,69 @@ export default function RideoutApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.riderCode]);
 
+  // RIDEOUT ALARM — alert the user when a joined or hosted ride is about to start.
+  // Fires an in-app banner + browser notification + short beep when a ride is <=60 min away,
+  // once per ride (tracked in localStorage). Poll runs every 30s while the tab is open.
+  const [rideAlarms, setRideAlarms] = useState([]); // [{event}, ...]
+  const [alertedRideIds, setAlertedRideIds] = useLocalState('rideout_alertedRideIds', []);
+
+  useEffect(() => {
+    // Ask for notification permission once per session (silent if denied).
+    if ('Notification' in window && Notification.permission === 'default') {
+      try { Notification.requestPermission().catch(() => {}); } catch (e) { /* ignore */ }
+    }
+
+    const myCode = profile.riderCode;
+    const iCareAbout = (ev) => {
+      if (!ev) return false;
+      if (joinedEvents.includes(ev.id)) return true;
+      if (myCode && ev.hostCode === myCode) return true;
+      return false;
+    };
+
+    const tick = () => {
+      const now = Date.now();
+      const cutoff = now + 60 * 60 * 1000; // 60 min from now
+
+      const dueNow = [];
+      events.forEach((ev) => {
+        if (!iCareAbout(ev)) return;
+        if (!ev.date) return;
+        const startMs = parseEventStartMs(ev.date, ev.time);
+        if (startMs == null) return;
+        // In the window [now, now+60min] and not already alerted.
+        if (startMs >= now && startMs <= cutoff && !alertedRideIds.includes(ev.id)) {
+          dueNow.push(ev);
+        }
+      });
+
+      if (dueNow.length) {
+        setRideAlarms((prev) => {
+          const seen = new Set(prev.map((a) => a.event.id));
+          const merged = [...prev];
+          dueNow.forEach((ev) => { if (!seen.has(ev.id)) merged.push({ event: ev }); });
+          return merged;
+        });
+        setAlertedRideIds((prev) => Array.from(new Set([...prev, ...dueNow.map((e) => e.id)])));
+        dueNow.forEach((ev) => {
+          fireAlarmBeep();
+          tryBrowserNotification(ev);
+        });
+      }
+    };
+
+    // Run once immediately so freshly-opening the app catches any already-imminent ride,
+    // then every 30s while the tab is open.
+    tick();
+    const iv = setInterval(tick, 30000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, joinedEvents, profile.riderCode, alertedRideIds]);
+
+  const dismissRideAlarm = (eventId) => {
+    setRideAlarms((prev) => prev.filter((a) => a.event.id !== eventId));
+  };
+
   const rideIcons = { bike: Bike, ebike: Bike, skates: Zap, scooter: Navigation, escooter: Navigation, other: Bike };
   const rideColors = { bike: 'bg-pink-500', ebike: 'bg-amber-400', skates: 'bg-blue-500', scooter: 'bg-cyan-400', escooter: 'bg-lime-400', other: 'bg-fuchsia-500' };
   const rideLabels = { bike: 'Bike', ebike: 'E-Bike', skates: 'Skates', scooter: 'Scooter', escooter: 'E-Scoot', other: 'Other' };
@@ -543,6 +668,11 @@ export default function RideoutApp() {
         try { localStorage.setItem('rideoutDemoSeen', '1'); } catch (e) {}
       }} />}
       {pendingPage && <PagerOverlay page={pendingPage} onDismiss={dismissPage} />}
+
+      {/* Ride alarm — fires when a joined/hosted rideout is <=1hr away. */}
+      {rideAlarms.length > 0 && (
+        <RideAlarmStack alarms={rideAlarms} onDismiss={dismissRideAlarm} />
+      )}
 
       {/* Active ride banner with SOS */}
       {activeRideToday && (
@@ -2140,13 +2270,8 @@ function InstallAppStep() {
     };
   }, []);
 
-  // Auto-popup on load (unless already installed). Small delay so the step
-  // visibly loads first — otherwise it feels like a jump-scare.
-  useEffect(() => {
-    if (isStandalone || installed) return;
-    const t = setTimeout(() => setShowModal(true), 600);
-    return () => clearTimeout(t);
-  }, [isStandalone, installed]);
+  // NOTE: Auto-popup intentionally disabled. We just encourage users to
+  // add to home screen via the always-visible button + underline link.
 
   const clickInstall = async () => {
     if (deferredPrompt) {
@@ -2169,8 +2294,8 @@ function InstallAppStep() {
       <div className="w-20 h-20 bg-white rounded-3xl mx-auto flex items-center justify-center mb-5 border-4 border-blue-500 shadow-2xl">
         <Upload size={38} className="text-pink-500" />
       </div>
-      <h2 className="text-3xl font-black mb-2 uppercase tracking-tight text-center">Install<br />Rideout</h2>
-      <p className="text-white/90 mb-5 font-semibold text-center text-sm">Add a shortcut to your home screen so it opens like a real app — no browser bars, full screen, one tap.</p>
+      <h2 className="text-3xl font-black mb-2 uppercase tracking-tight text-center">Add to<br />Home Screen</h2>
+      <p className="text-white/90 mb-5 font-semibold text-center text-sm">Save Rideout as a shortcut on your phone — it opens like a real app, full screen, one tap. Takes 5 seconds.</p>
 
       {isStandalone || installed ? (
         <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-center">
@@ -3514,6 +3639,52 @@ function ChatRoom({ profile, onClose }) {
           <Send size={16} />
         </button>
       </div>
+    </div>
+  );
+}
+
+// ===== RIDE ALARM STACK — shown when a joined/hosted ride is <=1 hour away =====
+function RideAlarmStack({ alarms, onDismiss }) {
+  return (
+    <div className="flex-none">
+      {alarms.map(({ event }) => (
+        <RideAlarmBanner key={event.id} event={event} onDismiss={() => onDismiss(event.id)} />
+      ))}
+    </div>
+  );
+}
+
+function RideAlarmBanner({ event, onDismiss }) {
+  // Keep the countdown live — re-render every 30s.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const iv = setInterval(() => tick((x) => x + 1), 30000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const startMs = parseEventStartMs(event.date, event.time);
+  const mins = startMs != null ? Math.max(0, Math.round((startMs - Date.now()) / 60000)) : null;
+  const label = mins == null
+    ? 'Starting soon'
+    : mins === 0
+      ? 'Starting now'
+      : `Starts in ${mins} min`;
+
+  return (
+    <div className="bg-gradient-to-r from-amber-500 to-pink-500 border-b-2 border-white/60 px-4 py-2.5 flex items-center gap-3">
+      <div className="w-9 h-9 rounded-full bg-white/25 border-2 border-white flex-none flex items-center justify-center animate-pulse">
+        <BellRing size={18} className="text-white" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-[10px] font-black uppercase tracking-wide text-white/90">Ride alarm · {label}</p>
+        <p className="text-sm font-black truncate">{event.title || 'Ride'}{event.location ? ` · ${event.location}` : ''}</p>
+      </div>
+      <button
+        onClick={onDismiss}
+        className="bg-white/90 text-pink-700 text-[10px] font-black px-2.5 py-1.5 rounded-full uppercase border-2 border-white flex-none active:scale-95"
+      >
+        Got it
+      </button>
     </div>
   );
 }
