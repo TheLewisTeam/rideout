@@ -48,19 +48,19 @@ export default function RideoutApp() {
   const openShareApp = () => setQrShare({
     title: 'Join me on Rideout',
     subtitle: `${profile.name}'s invite · Winter Haven crew`,
-    url: `rideout.app/i/${profile.name.toLowerCase().replace(/\s/g, '')}`,
+    url: `rideout-lilac.vercel.app/i/${profile.name.toLowerCase().replace(/\s/g, '')}`,
     accentColor: 'from-pink-500 to-blue-500'
   });
   const openShareCrew = (crew) => setQrShare({
     title: `Join ${crew.name}`,
     subtitle: `${crew.members} members · ${crew.city}`,
-    url: `rideout.app/c/${crew.tag}`,
+    url: `rideout-lilac.vercel.app/c/${crew.tag}`,
     accentColor: crew.color.replace('bg-', 'from-') + ' to-blue-500'
   });
   const openShareEvent = (event) => setQrShare({
     title: 'Share this ride',
     subtitle: `${event.title} · ${event.location}`,
-    url: `rideout.app/r/${event.id}`,
+    url: `rideout-lilac.vercel.app/r/${event.id}`,
     accentColor: 'from-pink-500 to-blue-500'
   });
 
