@@ -164,6 +164,37 @@ export default function RideoutApp() {
       msg: 'This is a test page.'
     });
   };
+
+  // Rider broadcasts their location so guardians can see them on the map.
+  // Writes to localStorage key rideout_rider_<CODE> and keeps it fresh with watchPosition.
+  useEffect(() => {
+    if (profile.role !== 'rider' || !profile.riderCode) return;
+    const key = `rideout_rider_${profile.riderCode}`;
+    const writePos = (lat, lng, speed) => {
+      try {
+        localStorage.setItem(key, JSON.stringify({
+          code: profile.riderCode,
+          name: profile.name || 'Rider',
+          coords: { lat, lng },
+          speed: typeof speed === 'number' && !isNaN(speed) ? speed : null,
+          at: Date.now()
+        }));
+      } catch (e) {}
+    };
+    // Seed immediately from saved coords so the guardian sees *something* even offline.
+    if (profile.coords) writePos(profile.coords.lat, profile.coords.lng, null);
+    let watchId = null;
+    if (navigator.geolocation) {
+      try {
+        watchId = navigator.geolocation.watchPosition(
+          (pos) => writePos(pos.coords.latitude, pos.coords.longitude, pos.coords.speed),
+          () => { /* silent; we already have the last-known */ },
+          { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 }
+        );
+      } catch (e) {}
+    }
+    return () => { if (watchId != null && navigator.geolocation) navigator.geolocation.clearWatch(watchId); };
+  }, [profile.role, profile.riderCode, profile.name, profile.coords]);
   const [showDemoTour, setShowDemoTour] = useState(false);
   const [activeTab, setActiveTab] = useState('discover');
   const [discoverSegment, setDiscoverSegment] = useState('rides'); // rides | calendar
@@ -217,7 +248,7 @@ export default function RideoutApp() {
   const electricTypes = ['ebike', 'escooter'];
 
   let filteredEvents = events;
-  if (filterType !== 'all') filteredEvents = filteredEvents.filter(e => e.type === filterType);
+  if (filterType !== 'all') filteredEvents = filteredEvents.filter(e => (e.types && e.types.includes(filterType)) || e.type === filterType);
   if (beginnerFriendly) filteredEvents = filteredEvents.filter(e => e.beginnerFriendly);
   if (levelFilter !== 'all') filteredEvents = filteredEvents.filter(e => e.level === levelFilter);
 
@@ -308,11 +339,14 @@ export default function RideoutApp() {
               <p className="text-xs text-white/90 mt-0.5 font-semibold tracking-wide">RIDE DEEP. RIDE TOGETHER.</p>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setProfile({ ...profile, role: 'guardian' })}
+                title="Switch to guardian mode"
+                className="h-10 px-3 rounded-full bg-amber-400 text-black flex items-center gap-1.5 border-2 border-white font-black text-[10px] uppercase tracking-wide active:scale-95">
+                <ShieldCheck size={14} />Guardian
+              </button>
               <button onClick={openShareApp} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white">
                 <QrCode size={18} />
-              </button>
-              <button onClick={() => setShowFriends(true)} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white">
-                <Users size={18} />
               </button>
               <button onClick={() => setActiveTab('profile')} className="w-10 h-10 rounded-full bg-white/20 backdrop-blur flex items-center justify-center border-2 border-white overflow-hidden">
                 {profile.avatar
@@ -635,6 +669,9 @@ function EventCard({ event, rideIcons, rideColors, isJoined, isFriendHost, onCli
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             {event.beginnerFriendly && <span className="bg-green-500/20 text-green-400 text-[9px] px-1.5 py-0.5 rounded font-black uppercase">Beginner OK</span>}
             <span className="bg-zinc-800 text-zinc-300 text-[9px] px-1.5 py-0.5 rounded font-black uppercase">{event.level}</span>
+            {event.types && event.types.length > 1 && (
+              <span className="bg-blue-500/20 text-blue-300 text-[9px] px-1.5 py-0.5 rounded font-black uppercase">+{event.types.length - 1} types</span>
+            )}
           </div>
           <div className="flex items-center gap-3 mt-2 text-xs text-zinc-300">
             <span className="flex items-center gap-1"><Clock size={12} />{formatDate(event.date)} · {event.time}</span>
@@ -1979,10 +2016,16 @@ function CreateEventModal({ profileName, crews, onClose, onCreate, showRouteBuil
     return d.toISOString().slice(0, 10);
   })();
   const [form, setForm] = useState({
-    title: '', type: 'bike', date: defaultDate, time: '18:00', location: '',
+    title: '', type: 'bike', types: ['bike'], date: defaultDate, time: '18:00', location: '',
     distance: '5 mi', pace: 'Chill', description: '', host: profileName,
     attendees: 1, route: [], level: 'moderate', beginnerFriendly: false, crewId: null
   });
+  const toggleType = (id) => {
+    const has = form.types.includes(id);
+    const next = has ? form.types.filter(t => t !== id) : [...form.types, id];
+    const safe = next.length > 0 ? next : ['bike'];
+    setForm({ ...form, types: safe, type: safe[0] });
+  };
   if (showRouteBuilder) {
     return <RouteBuilder initialRoute={form.route} mapView={mapView}
       onDone={(route) => { setForm({...form, route}); setShowRouteBuilder(false); }}
@@ -2002,7 +2045,7 @@ function CreateEventModal({ profileName, crews, onClose, onCreate, showRouteBuil
               className="w-full bg-zinc-900 rounded-xl px-4 py-3 mt-1 text-sm outline-none border-2 border-zinc-800 focus:border-pink-500" />
           </div>
           <div>
-            <label className="text-xs text-zinc-400 font-black uppercase">Ride type</label>
+            <label className="text-xs text-zinc-400 font-black uppercase">Ride types · pick all that apply</label>
             <div className="grid grid-cols-3 gap-2 mt-1">
               {[
                 { id: 'bike', label: 'Bike', icon: Bike, electric: false },
@@ -2013,16 +2056,19 @@ function CreateEventModal({ profileName, crews, onClose, onCreate, showRouteBuil
                 { id: 'other', label: 'Other', icon: Bike, electric: false }
               ].map(t => {
                 const Icon = t.icon;
+                const selected = form.types.includes(t.id);
                 return (
-                  <button key={t.id} onClick={() => setForm({...form, type: t.id})}
-                    className={`py-3 rounded-xl flex flex-col items-center gap-1 transition border-2 relative ${form.type === t.id ? 'bg-gradient-to-br from-pink-500 to-blue-500 border-white' : 'bg-zinc-900 border-zinc-800'}`}>
+                  <button key={t.id} onClick={() => toggleType(t.id)}
+                    className={`py-3 rounded-xl flex flex-col items-center gap-1 transition border-2 relative ${selected ? 'bg-gradient-to-br from-pink-500 to-blue-500 border-white' : 'bg-zinc-900 border-zinc-800'}`}>
                     {t.electric && <div className="absolute top-1 right-1 bg-yellow-300 rounded-full p-0.5 border border-zinc-950"><Zap size={8} fill="currentColor" className="text-yellow-900" /></div>}
+                    {selected && <div className="absolute top-1 left-1 bg-white rounded-full p-0.5 border border-pink-600"><Check size={8} className="text-pink-600" /></div>}
                     <Icon size={18} />
                     <span className="text-[10px] font-black uppercase">{t.label}</span>
                   </button>
                 );
               })}
             </div>
+            <p className="text-[10px] text-zinc-500 mt-1.5 font-semibold">{form.types.length} selected — everyone with any of these ride types will see your rideout.</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -2239,11 +2285,35 @@ function GuardianOnboarding({ profile, setProfile, onSwitchRole }) {
   );
 }
 
-// ===== GUARDIAN HOME =====
+// ===== GUARDIAN HOME (map + pager buttons) =====
 function GuardianHome({ profile, setProfile, onSwitchRole }) {
   const [showLink, setShowLink] = useState(false);
   const [lastPage, setLastPage] = useState({}); // riderCode -> timestamp
+  const [positions, setPositions] = useState({}); // riderCode -> { coords, speed, at, name }
+  const [selectedCode, setSelectedCode] = useState(null);
+  const [switchToRider, setSwitchToRider] = useState(false);
   const linkedRiders = profile.linkedRiders || [];
+
+  // Poll localStorage for each linked rider's last-known position every 4s.
+  useEffect(() => {
+    const read = () => {
+      const next = {};
+      linkedRiders.forEach(r => {
+        try {
+          const raw = localStorage.getItem(`rideout_rider_${r.code}`);
+          if (raw) next[r.code] = JSON.parse(raw);
+        } catch (e) {}
+      });
+      setPositions(next);
+    };
+    read();
+    const id = setInterval(read, 4000);
+    const handler = (e) => {
+      if (e.key && e.key.startsWith('rideout_rider_')) read();
+    };
+    window.addEventListener('storage', handler);
+    return () => { clearInterval(id); window.removeEventListener('storage', handler); };
+  }, [linkedRiders.length]);
 
   const linkRider = (code, name) => {
     const clean = (code || '').toUpperCase().trim();
@@ -2252,75 +2322,239 @@ function GuardianHome({ profile, setProfile, onSwitchRole }) {
     setProfile({ ...profile, linkedRiders: [...linkedRiders, { code: clean, name: name.trim() || clean }] });
     setShowLink(false);
   };
-
-  const unlink = (code) => setProfile({ ...profile, linkedRiders: linkedRiders.filter(r => r.code !== code) });
-
+  const unlink = (code) => {
+    setProfile({ ...profile, linkedRiders: linkedRiders.filter(r => r.code !== code) });
+    if (selectedCode === code) setSelectedCode(null);
+  };
   const pageRider = (rider) => {
     sendPage(rider.code, profile.name, profile.phone, `${profile.name} is paging you. Please check in.`);
     setLastPage({ ...lastPage, [rider.code]: Date.now() });
   };
 
+  const selected = selectedCode
+    ? { rider: linkedRiders.find(r => r.code === selectedCode), pos: positions[selectedCode] }
+    : null;
+
   return (
     <div className="w-full max-w-md mx-auto bg-zinc-950 text-white relative overflow-hidden flex flex-col" style={{height: '100dvh', WebkitTapHighlightColor: 'transparent'}}>
       <div className="flex-none">
-        <div className="bg-gradient-to-r from-amber-500 via-amber-600 to-pink-500 px-4 pb-4" style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)'}}>
+        <div className="bg-gradient-to-r from-amber-500 via-amber-600 to-pink-500 px-4 pb-3" style={{paddingTop: 'max(env(safe-area-inset-top), 1.5rem)'}}>
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-black tracking-tight flex items-center gap-2" style={{textShadow: '2px 2px 0 rgba(0,0,0,0.2)'}}>
                 <ShieldCheck size={22} />GUARDIAN
               </h1>
-              <p className="text-xs text-white/90 mt-0.5 font-semibold tracking-wide">{profile.name} · {profile.phone}</p>
+              <p className="text-xs text-white/90 mt-0.5 font-semibold tracking-wide truncate">{profile.name} · {profile.phone}</p>
             </div>
-            <button onClick={onSwitchRole} className="text-[10px] font-black uppercase bg-white/20 border-2 border-white rounded-full px-3 py-2 active:scale-95">
-              Sign out
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setProfile({ ...profile, role: 'rider' })}
+                title="Switch to rider mode"
+                className="h-9 px-3 rounded-full bg-pink-500 text-white flex items-center gap-1.5 border-2 border-white font-black text-[10px] uppercase tracking-wide active:scale-95">
+                <Bike size={14} />Rider
+              </button>
+              <button onClick={() => setShowLink(true)} className="h-9 w-9 rounded-full bg-white/20 backdrop-blur border-2 border-white flex items-center justify-center active:scale-95" title="Link a rider">
+                <UserPlus size={16} />
+              </button>
+            </div>
           </div>
         </div>
         <CheckeredStrip color1="#3b82f6" color2="#ffffff" />
       </div>
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        <div className="bg-amber-500/10 border-2 border-amber-500/40 rounded-2xl p-4 flex items-start gap-3">
-          <Bell size={20} className="text-amber-400 flex-none mt-0.5" />
-          <div className="flex-1 text-xs font-semibold text-amber-100">
-            Tap <span className="font-black">PAGE</span> to ring your rider's phone like a 90s pager. They'll see your name and number so they can call you back.
-          </div>
-        </div>
-        <h2 className="text-xs text-zinc-400 font-black uppercase mt-3 tracking-wider">Your riders</h2>
+
+      {/* MAP */}
+      <GuardianMap riders={linkedRiders} positions={positions} onSelect={setSelectedCode} selectedCode={selectedCode} />
+
+      {/* BOTTOM PANEL */}
+      <div className="flex-1 overflow-y-auto p-4 bg-zinc-950">
         {linkedRiders.length === 0 ? (
           <div className="bg-zinc-900 rounded-2xl p-6 text-center border-2 border-zinc-800">
             <Users size={32} className="mx-auto text-zinc-600 mb-2" />
             <p className="text-sm font-black uppercase">No riders linked yet</p>
-            <p className="text-xs text-zinc-400 mt-1">Ask your rider to open Rideout → Profile → Guardians & Pager and share their 6-char code with you.</p>
+            <p className="text-xs text-zinc-400 mt-1">Tap the <span className="text-amber-400 font-black">+ person</span> button above. You'll need the rider's 6-char code from their Profile → Guardians & Pager.</p>
           </div>
-        ) : linkedRiders.map(r => {
-          const recently = lastPage[r.code] && Date.now() - lastPage[r.code] < 60000;
-          return (
-            <div key={r.code} className="bg-zinc-900 rounded-2xl border-2 border-zinc-800 overflow-hidden">
-              <div className="p-4 flex items-center gap-3">
-                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-pink-500 to-blue-500 border-2 border-white flex items-center justify-center">
-                  <Bike size={20} />
+        ) : selected && selected.rider ? (
+          <GuardianRiderCard
+            rider={selected.rider}
+            pos={selected.pos}
+            onClose={() => setSelectedCode(null)}
+            onPage={() => pageRider(selected.rider)}
+            onUnlink={() => unlink(selected.rider.code)}
+            paged={lastPage[selected.rider.code] && Date.now() - lastPage[selected.rider.code] < 60000}
+          />
+        ) : (
+          <div className="space-y-2">
+            <h2 className="text-xs text-zinc-400 font-black uppercase tracking-wider mb-2">Your riders · tap a pin or a row</h2>
+            {linkedRiders.map(r => {
+              const p = positions[r.code];
+              const recently = lastPage[r.code] && Date.now() - lastPage[r.code] < 60000;
+              return (
+                <div key={r.code} className="bg-zinc-900 rounded-2xl border-2 border-zinc-800 overflow-hidden">
+                  <button onClick={() => setSelectedCode(r.code)} className="w-full p-3 flex items-center gap-3 text-left active:bg-zinc-800">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-pink-500 to-blue-500 border-2 border-white flex items-center justify-center">
+                      <Bike size={18} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-black text-sm truncate">{r.name}</p>
+                      <p className="text-[10px] text-zinc-400 font-mono tracking-widest">{r.code} · {p ? formatAgo(p.at) : 'no location yet'}</p>
+                    </div>
+                    <ChevronRight size={16} className="text-zinc-600" />
+                  </button>
+                  <button onClick={() => pageRider(r)}
+                    className={`w-full py-2.5 font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 border-t-2 border-black/20 ${recently ? 'bg-green-500 text-white' : 'bg-amber-500 text-black'} active:scale-[0.98] transition`}>
+                    {recently ? <><Check size={14} />Paged</> : <><BellRing size={14} />Page {r.name}</>}
+                  </button>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-black">{r.name}</p>
-                  <p className="text-[10px] text-zinc-400 font-mono tracking-widest">{r.code}</p>
-                </div>
-                <button onClick={() => unlink(r.code)} className="text-zinc-500 active:scale-95" aria-label="Unlink">
-                  <X size={16} />
-                </button>
-              </div>
-              <button onClick={() => pageRider(r)}
-                className={`w-full py-4 font-black uppercase tracking-widest text-lg flex items-center justify-center gap-2 border-t-2 border-black/20 ${recently ? 'bg-green-500 text-white' : 'bg-amber-500 text-black'} active:scale-[0.98] transition`}>
-                {recently ? <><Check size={20} />Paged</> : <><BellRing size={20} />Page {r.name}</>}
-              </button>
-            </div>
-          );
-        })}
-        <button onClick={() => setShowLink(true)}
-          className="w-full mt-2 bg-zinc-900 rounded-2xl p-4 flex items-center justify-center gap-2 border-2 border-dashed border-amber-500/50 text-amber-400 font-black uppercase text-sm active:scale-95">
-          <UserPlus size={18} />Link a rider
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {showLink && <LinkRiderModal onClose={() => setShowLink(false)} onLink={linkRider} />}
+    </div>
+  );
+}
+
+// Human-readable "X ago" from a unix millisecond timestamp
+function formatAgo(t) {
+  if (!t) return 'never';
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+// Speed in m/s → "x mph"
+function speedMph(mps) {
+  if (mps == null || isNaN(mps) || mps < 0) return '—';
+  return `${(mps * 2.23694).toFixed(1)} mph`;
+}
+
+// ===== GUARDIAN MAP (Leaflet) =====
+function GuardianMap({ riders, positions, onSelect, selectedCode }) {
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+  const tileLayerRef = useRef(null);
+  const markerLayerRef = useRef(null);
+  const [mapView, setMapView] = useState('street');
+
+  // Initialize map once
+  useEffect(() => {
+    if (!window.L || !containerRef.current || mapRef.current) return;
+    const L = window.L;
+    const map = L.map(containerRef.current, {
+      center: [28.0222, -81.7328], zoom: 12, zoomControl: false, attributionControl: true
+    });
+    const tiles = MAP_TILES[mapView] || MAP_TILES.street;
+    tileLayerRef.current = L.tileLayer(tiles.url, { attribution: tiles.attribution, maxZoom: 19 }).addTo(map);
+    markerLayerRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    setTimeout(() => map.invalidateSize(), 100);
+    return () => { map.remove(); mapRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Swap tiles on toggle
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    if (tileLayerRef.current) mapRef.current.removeLayer(tileLayerRef.current);
+    const tiles = MAP_TILES[mapView] || MAP_TILES.street;
+    tileLayerRef.current = window.L.tileLayer(tiles.url, { attribution: tiles.attribution, maxZoom: 19 }).addTo(mapRef.current);
+  }, [mapView]);
+
+  // Render rider pins + auto-fit bounds whenever positions change
+  useEffect(() => {
+    if (!mapRef.current || !window.L || !markerLayerRef.current) return;
+    const L = window.L;
+    markerLayerRef.current.clearLayers();
+    const pts = [];
+    riders.forEach(r => {
+      const p = positions[r.code];
+      if (!p || !p.coords) return;
+      const isSelected = r.code === selectedCode;
+      const ring = isSelected ? '#fef3c7' : '#ffffff';
+      const body = isSelected ? '#f59e0b' : '#ec4899';
+      const html = `
+        <div style="position:relative;width:44px;height:44px;">
+          <div style="position:absolute;inset:0;border-radius:50%;background:${body}33;animation:pulse 2s infinite;"></div>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;background:${body};border:3px solid ${ring};box-shadow:0 4px 10px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:11px;font-family:ui-monospace,monospace;">${(r.name||'?').charAt(0).toUpperCase()}</div>
+        </div>`;
+      const icon = L.divIcon({ html, className: '', iconSize: [44, 44], iconAnchor: [22, 22] });
+      const marker = L.marker([p.coords.lat, p.coords.lng], { icon }).addTo(markerLayerRef.current);
+      marker.on('click', () => onSelect(r.code));
+      pts.push([p.coords.lat, p.coords.lng]);
+    });
+    if (pts.length === 1) {
+      mapRef.current.setView(pts[0], 14);
+    } else if (pts.length > 1) {
+      try { mapRef.current.fitBounds(pts, { padding: [40, 40], maxZoom: 14 }); } catch (e) {}
+    }
+  }, [riders, positions, selectedCode, onSelect]);
+
+  return (
+    <div className="relative h-72 flex-none border-b-2 border-amber-500/40 bg-zinc-900">
+      <div ref={containerRef} className="absolute inset-0" style={{zIndex: 1}} />
+      <div className="absolute top-3 left-3 bg-zinc-950/90 backdrop-blur px-3 py-1.5 rounded-full text-xs font-black flex items-center gap-1.5 z-[500] border border-amber-500/60 uppercase pointer-events-none">
+        <Eye size={12} className="text-amber-400" />Live tracking
+      </div>
+      <button onClick={() => setMapView(mapView === 'street' ? 'satellite' : 'street')}
+        className="absolute top-3 right-3 bg-zinc-950/90 backdrop-blur px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 z-[500] border border-blue-500/40 uppercase text-white">
+        <Layers size={12} />{mapView === 'street' ? 'Satellite' : 'Street'}
+      </button>
+    </div>
+  );
+}
+
+// ===== GUARDIAN RIDER CARD (appears when a rider pin is selected) =====
+function GuardianRiderCard({ rider, pos, onClose, onPage, onUnlink, paged }) {
+  const hasPos = pos && pos.coords;
+  return (
+    <div className="bg-zinc-900 rounded-2xl border-2 border-amber-500/50 overflow-hidden">
+      <div className="p-4 flex items-center gap-3">
+        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-pink-500 to-blue-500 border-2 border-white flex items-center justify-center">
+          <Bike size={22} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-black text-lg truncate">{rider.name}</p>
+          <p className="text-[10px] text-zinc-400 font-mono tracking-widest">{rider.code} · {hasPos ? formatAgo(pos.at) : 'no location yet'}</p>
+        </div>
+        <button onClick={onClose} className="text-zinc-500 active:scale-95" aria-label="Back">
+          <X size={18} />
         </button>
       </div>
-      {showLink && <LinkRiderModal onClose={() => setShowLink(false)} onLink={linkRider} />}
+      {hasPos ? (
+        <div className="grid grid-cols-3 gap-2 px-4 pb-3">
+          <div className="bg-zinc-800 rounded-xl p-2.5 border border-zinc-700">
+            <p className="text-[9px] text-zinc-500 font-black uppercase">Lat</p>
+            <p className="text-sm font-mono font-black tabular-nums mt-0.5">{pos.coords.lat.toFixed(5)}</p>
+          </div>
+          <div className="bg-zinc-800 rounded-xl p-2.5 border border-zinc-700">
+            <p className="text-[9px] text-zinc-500 font-black uppercase">Lng</p>
+            <p className="text-sm font-mono font-black tabular-nums mt-0.5">{pos.coords.lng.toFixed(5)}</p>
+          </div>
+          <div className="bg-zinc-800 rounded-xl p-2.5 border border-zinc-700">
+            <p className="text-[9px] text-zinc-500 font-black uppercase">Speed</p>
+            <p className="text-sm font-mono font-black tabular-nums mt-0.5 text-amber-400">{speedMph(pos.speed)}</p>
+          </div>
+        </div>
+      ) : (
+        <div className="px-4 pb-3">
+          <div className="bg-zinc-800 rounded-xl p-3 text-xs text-zinc-400 border border-zinc-700">
+            Waiting for <span className="font-black text-white">{rider.name}</span> to open Rideout and share their location. Their pin will appear here automatically.
+          </div>
+        </div>
+      )}
+      <button onClick={onPage}
+        className={`w-full py-4 font-black uppercase tracking-widest text-lg flex items-center justify-center gap-2 border-t-2 border-black/20 ${paged ? 'bg-green-500 text-white' : 'bg-amber-500 text-black'} active:scale-[0.98] transition`}>
+        {paged ? <><Check size={20} />Paged · ringing their phone</> : <><BellRing size={22} />Page {rider.name}</>}
+      </button>
+      <button onClick={onUnlink}
+        className="w-full py-2 text-[10px] font-black uppercase tracking-widest text-zinc-500 border-t border-zinc-800 active:text-red-400">
+        Unlink rider
+      </button>
     </div>
   );
 }
