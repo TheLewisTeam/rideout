@@ -132,7 +132,8 @@ export default function RideoutApp() {
     riderCode: '',           // riders: their own code; guardians ignore
     phone: '',               // guardians: their callback number
     guardians: [],           // riders: [{ name, phone }]
-    linkedRiders: []         // guardians: [{ code, name }]
+    linkedRiders: [],        // guardians: [{ code, name }]
+    termsAccepted: false     // Lewis Team terms + good-faith acknowledgement
   });
   const [pendingPage, setPendingPage] = useState(null);
 
@@ -1854,6 +1855,12 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
             </div>
           )}
           {step === 4 && (
+            <InstallAppStep />
+          )}
+          {step === 5 && (
+            <TermsStep profile={profile} setProfile={setProfile} />
+          )}
+          {step === 6 && (
             <div className="text-center">
               <div className="w-24 h-24 bg-white rounded-full mx-auto flex items-center justify-center mb-6 border-4 border-blue-500 shadow-2xl">
                 <Sparkles size={48} className="text-pink-500" />
@@ -1867,17 +1874,136 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
         </div>
         <div className="pt-6">
           <div className="flex gap-1.5 mb-4 justify-center">
-            {[0,1,2,3,4].map(i => (
+            {[0,1,2,3,4,5,6].map(i => (
               <div key={i} className={`h-2 rounded-full transition-all border border-white/60 ${i === step ? 'w-10 bg-white' : 'w-2 bg-white/30'}`} />
             ))}
           </div>
-          <button onClick={() => step === 4 ? onComplete() : setStep(step + 1)} disabled={step === 1 && !profile.name.trim()}
+          <button
+            onClick={() => step === 6 ? onComplete() : setStep(step + 1)}
+            disabled={(step === 1 && !profile.name.trim()) || (step === 5 && !profile.termsAccepted)}
             className="w-full bg-white text-pink-600 font-black py-4 rounded-2xl flex items-center justify-center gap-2 text-lg disabled:opacity-50 border-4 border-blue-500 uppercase tracking-wide shadow-xl">
-            {step === 4 ? 'Start riding' : step === 0 ? 'Get started' : 'Continue'}
+            {step === 6 ? 'Start riding' : step === 0 ? 'Get started' : 'Continue'}
             <ArrowRight size={20} />
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ===== ONBOARDING: Add-to-home-screen / install =====
+function InstallAppStep() {
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [installed, setInstalled] = useState(false);
+
+  useEffect(() => {
+    const handler = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    window.addEventListener('appinstalled', () => setInstalled(true));
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  const clickInstall = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') setInstalled(true);
+    setDeferredPrompt(null);
+  };
+
+  // Detect iOS (needs manual Add to Home Screen via Share sheet).
+  const isIOS = typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const isStandalone = typeof window !== 'undefined' &&
+    (window.matchMedia('(display-mode: standalone)').matches ||
+     window.navigator.standalone === true);
+
+  return (
+    <div>
+      <div className="w-20 h-20 bg-white rounded-3xl mx-auto flex items-center justify-center mb-5 border-4 border-blue-500 shadow-2xl">
+        <Upload size={38} className="text-pink-500" />
+      </div>
+      <h2 className="text-3xl font-black mb-2 uppercase tracking-tight text-center">Install<br />Rideout</h2>
+      <p className="text-white/90 mb-5 font-semibold text-center text-sm">Add a shortcut to your home screen so it opens like a real app.</p>
+
+      {isStandalone || installed ? (
+        <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-center">
+          <Check size={24} className="mx-auto mb-1" />
+          <p className="font-black text-sm uppercase">Installed — nice.</p>
+          <p className="text-xs text-white/80 mt-1">You can keep going.</p>
+        </div>
+      ) : deferredPrompt ? (
+        <button
+          onClick={clickInstall}
+          className="w-full bg-white text-pink-600 font-black py-3.5 rounded-2xl flex items-center justify-center gap-2 text-base border-4 border-blue-500 uppercase tracking-wide shadow-xl active:scale-95">
+          <Upload size={18} />Install app
+        </button>
+      ) : isIOS ? (
+        <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-sm space-y-2 font-semibold">
+          <p className="font-black uppercase tracking-wide text-xs">iPhone / iPad</p>
+          <ol className="list-decimal list-inside space-y-1 text-white/95">
+            <li>Tap the <span className="font-black">Share</span> button at the bottom of Safari (the square with the up arrow).</li>
+            <li>Scroll down, tap <span className="font-black">Add to Home Screen</span>.</li>
+            <li>Tap <span className="font-black">Add</span> — the Rideout icon appears on your home screen.</li>
+          </ol>
+        </div>
+      ) : (
+        <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-sm space-y-2 font-semibold">
+          <p className="font-black uppercase tracking-wide text-xs">Android / Chrome</p>
+          <ol className="list-decimal list-inside space-y-1 text-white/95">
+            <li>Tap the <span className="font-black">⋮</span> menu in Chrome (top-right).</li>
+            <li>Tap <span className="font-black">Install app</span> or <span className="font-black">Add to Home screen</span>.</li>
+            <li>Confirm — Rideout lives on your home screen like any other app.</li>
+          </ol>
+        </div>
+      )}
+
+      <p className="text-[11px] text-white/70 mt-4 text-center">Optional — you can skip this and install later from the Profile screen.</p>
+    </div>
+  );
+}
+
+// ===== ONBOARDING: Terms & The Lewis Team =====
+function TermsStep({ profile, setProfile }) {
+  return (
+    <div>
+      <div className="w-20 h-20 bg-white rounded-3xl mx-auto flex items-center justify-center mb-5 border-4 border-blue-500 shadow-2xl">
+        <Heart size={36} className="text-pink-500" fill="currentColor" />
+      </div>
+      <h2 className="text-3xl font-black mb-2 uppercase tracking-tight text-center">Ride in<br />good faith</h2>
+      <p className="text-white/90 mb-4 font-semibold text-center text-sm">A quick note before you roll.</p>
+
+      <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-sm space-y-3">
+        <p className="font-black uppercase tracking-wide text-xs">From The Lewis Team</p>
+        <p className="text-white leading-snug">
+          <span className="font-black">The Lewis Team wishes you a safe, joyful ride.</span>
+        </p>
+        <div className="h-px bg-white/30" />
+        <p className="text-white/95 leading-snug">
+          If anyone you know wants to <span className="font-black">buy, sell, or invest in real estate</span>,
+          The Lewis Team is here to help. Reach out anytime — we appreciate the referrals.
+        </p>
+        <div className="h-px bg-white/30" />
+        <p className="text-white/90 text-xs leading-snug">
+          Rideout is provided as-is. Ride defensively, obey traffic laws, wear your helmet, and look out for your
+          crew. Rideout, The Lewis Team, and its creators are not responsible for decisions you make or injuries
+          that happen on a ride.
+        </p>
+      </div>
+
+      <label className="mt-4 flex items-start gap-3 bg-white/10 backdrop-blur rounded-2xl p-3 border-2 border-white/40 cursor-pointer active:scale-[0.99]">
+        <input
+          type="checkbox"
+          checked={!!profile.termsAccepted}
+          onChange={(e) => setProfile({ ...profile, termsAccepted: e.target.checked })}
+          className="mt-1 w-5 h-5 accent-pink-500 flex-none"
+        />
+        <span className="text-sm font-semibold text-white leading-snug">
+          I accept using this app <span className="font-black">"in good faith"</span> and understand the note from The Lewis Team above.
+        </span>
+      </label>
     </div>
   );
 }
@@ -2952,7 +3078,21 @@ function ChatRoom({ profile, onClose }) {
       body,
     });
     setSending(false);
-    if (res && res.data) setDraft('');
+    if (res && res.data) {
+      // Optimistic-style insert: the realtime subscription may or may not echo
+      // the sender's own insert; we add it here and dedupe by id in the handler.
+      setMessages((prev) => prev.find((x) => x.id === res.data.id) ? prev : [...prev, res.data]);
+      setDraft('');
+      setTimeout(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }, 50);
+    } else if (res && res.error) {
+      alert(
+        'Could not send chat message:\n\n' + res.error +
+        '\n\nMost common cause: the chat_messages table doesn\'t exist yet. ' +
+        'Open Supabase → SQL Editor → paste supabase-schema.sql → Run.'
+      );
+    }
   };
 
   const onKey = (e) => {
