@@ -18,6 +18,11 @@ import {
   fetchChatMessages,
   sendChatMessage,
   subscribeChat,
+  fetchFeedPosts,
+  createFeedPost,
+  deleteFeedPost,
+  toggleFeedLike,
+  subscribeFeed,
 } from './lib/supabase';
 
 // Random 6-char rider code for guardian linking (no confusing chars)
@@ -136,6 +141,20 @@ export default function RideoutApp() {
     termsAccepted: false     // Lewis Team terms + good-faith acknowledgement
   });
   const [pendingPage, setPendingPage] = useState(null);
+
+  // Migration: patch any missing fields on older saved profiles so
+  // components that do .map/.filter on profile.rideTypes etc. don't crash.
+  useEffect(() => {
+    const patch = {};
+    if (!Array.isArray(profile.rideTypes)) patch.rideTypes = ['bike'];
+    if (!Array.isArray(profile.guardians)) patch.guardians = [];
+    if (!Array.isArray(profile.linkedRiders)) patch.linkedRiders = [];
+    if (!Array.isArray(profile.locationSharedWith)) patch.locationSharedWith = [];
+    if (typeof profile.termsAccepted !== 'boolean') patch.termsAccepted = false;
+    if (typeof profile.riderCode !== 'string') patch.riderCode = '';
+    if (Object.keys(patch).length) setProfile({ ...profile, ...patch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Ensure a rider always has a code
   useEffect(() => {
@@ -330,6 +349,19 @@ export default function RideoutApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // SHARED FEED — load ride feed posts + likes from Supabase, live across devices.
+  useEffect(() => {
+    if (!supabaseReady) return;
+    let cancelled = false;
+    const reload = () => fetchFeedPosts(profile.riderCode).then((rows) => {
+      if (!cancelled) setFeedPosts(rows);
+    });
+    reload();
+    const unsub = subscribeFeed(() => reload());
+    return () => { cancelled = true; unsub(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.riderCode]);
+
   const rideIcons = { bike: Bike, ebike: Bike, skates: Zap, scooter: Navigation, escooter: Navigation, other: Bike };
   const rideColors = { bike: 'bg-pink-500', ebike: 'bg-amber-400', skates: 'bg-blue-500', scooter: 'bg-cyan-400', escooter: 'bg-lime-400', other: 'bg-fuchsia-500' };
   const rideLabels = { bike: 'Bike', ebike: 'E-Bike', skates: 'Skates', scooter: 'Scooter', escooter: 'E-Scoot', other: 'Other' };
@@ -370,7 +402,59 @@ export default function RideoutApp() {
   };
 
   const toggleLike = (postId) => {
-    setFeedPosts(feedPosts.map(p => p.id === postId ? {...p, liked: !p.liked, likes: p.likes + (p.liked ? -1 : 1)} : p));
+    const post = feedPosts.find(p => p.id === postId);
+    if (!post) return;
+    const wasLiked = !!post.liked;
+    // Optimistic: flip locally, reconcile from realtime.
+    setFeedPosts(feedPosts.map(p => p.id === postId
+      ? { ...p, liked: !wasLiked, likes: Math.max(0, (p.likes || 0) + (wasLiked ? -1 : 1)) }
+      : p));
+    if (supabaseReady && profile.riderCode) {
+      toggleFeedLike({ postId, riderCode: profile.riderCode, liked: wasLiked });
+    }
+  };
+
+  // Publish a new ride recap to the shared feed.
+  const publishFeedPost = async ({ rideType, body, distance, duration }) => {
+    if (!body || !body.trim()) return { error: 'Write something first.' };
+    if (!supabaseReady) {
+      // Offline fallback: local-only.
+      const local = {
+        id: `local-${Date.now()}`,
+        author: profile.name || 'Rider',
+        authorCode: profile.riderCode || null,
+        avatar: profile.avatar || null,
+        rideType: rideType || 'bike',
+        body: body.trim(),
+        distance: distance || null,
+        duration: duration || null,
+        createdAt: new Date().toISOString(),
+        likes: 0, liked: false, comments: [],
+      };
+      setFeedPosts([local, ...feedPosts]);
+      return { data: local };
+    }
+    const res = await createFeedPost({
+      authorName: profile.name,
+      authorCode: profile.riderCode,
+      avatar: profile.avatar,
+      rideType: rideType || 'bike',
+      body,
+      distance: distance || null,
+      duration: duration || null,
+    });
+    if (res && res.data) {
+      // Optimistic insert; realtime reconciliation will no-op via id dedupe.
+      setFeedPosts((prev) => prev.find(p => p.id === res.data.id) ? prev : [res.data, ...prev]);
+    } else if (res && res.error) {
+      alert('Could not publish your recap:\n\n' + res.error + '\n\nMake sure you\'ve re-run supabase-schema.sql (adds feed_posts table).');
+    }
+    return res;
+  };
+
+  const removeFeedPost = async (postId) => {
+    setFeedPosts(feedPosts.filter(p => p.id !== postId));
+    if (supabaseReady) await deleteFeedPost(postId);
   };
 
   const addComment = (eventId, text) => {
@@ -501,7 +585,10 @@ export default function RideoutApp() {
         {activeTab === 'feed' && (
           <FeedScreen
             posts={feedPosts} onLike={toggleLike}
-            rideColors={rideColors} rideIcons={rideIcons}
+            profile={profile}
+            onPublish={publishFeedPost}
+            onDelete={removeFeedPost}
+            rideColors={rideColors} rideIcons={rideIcons} rideLabels={rideLabels}
           />
         )}
         {activeTab === 'profile' && (
@@ -1148,7 +1235,7 @@ function CreateCrewModal({ onClose, onCreate, profileCity = '' }) {
 }
 
 // ===== FEED =====
-function FeedScreen({ posts, onLike, rideColors, rideIcons }) {
+function FeedScreen({ posts, onLike, profile, onPublish, onDelete, rideColors, rideIcons, rideLabels }) {
   return (
     <div className="pb-4">
       <div className="px-4 py-3 flex items-center justify-between sticky top-0 bg-zinc-950 z-10 border-b border-zinc-800">
@@ -1156,14 +1243,25 @@ function FeedScreen({ posts, onLike, rideColors, rideIcons }) {
         <Rss size={20} className="text-pink-500" />
       </div>
       <div className="space-y-4 px-4 pt-4">
-        {posts.map(post => <FeedPostCard key={post.id} post={post} onLike={() => onLike(post.id)} rideColors={rideColors} rideIcons={rideIcons} />)}
+        <FeedComposer profile={profile} onPublish={onPublish} rideIcons={rideIcons} rideColors={rideColors} rideLabels={rideLabels} />
+        {posts.map(post => (
+          <FeedPostCard
+            key={post.id}
+            post={post}
+            onLike={() => onLike(post.id)}
+            onDelete={onDelete && post.authorCode && post.authorCode === profile.riderCode ? () => onDelete(post.id) : null}
+            rideColors={rideColors}
+            rideIcons={rideIcons}
+            rideLabels={rideLabels}
+          />
+        ))}
         {posts.length === 0 && (
-          <div className="text-center py-16">
+          <div className="text-center py-12">
             <div className="w-20 h-20 rounded-2xl bg-zinc-900 border-2 border-zinc-800 flex items-center justify-center mx-auto mb-4">
               <Rss size={32} className="text-zinc-600" />
             </div>
             <p className="text-sm font-black uppercase tracking-wide text-zinc-300">No recaps yet</p>
-            <p className="text-xs text-zinc-500 mt-1.5 max-w-[260px] mx-auto font-semibold">Finish a ride and post a recap to kick off the feed. Photos, stats, and shoutouts show up here.</p>
+            <p className="text-xs text-zinc-500 mt-1.5 max-w-[260px] mx-auto font-semibold">Be the first — share how the ride went up above.</p>
           </div>
         )}
       </div>
@@ -1171,66 +1269,192 @@ function FeedScreen({ posts, onLike, rideColors, rideIcons }) {
   );
 }
 
-function FeedPostCard({ post, onLike, rideColors, rideIcons }) {
-  const Icon = rideIcons[post.rideType];
+function FeedComposer({ profile, onPublish, rideIcons, rideColors, rideLabels }) {
+  const [open, setOpen] = useState(false);
+  const [body, setBody] = useState('');
+  const [rideType, setRideType] = useState(profile?.preferredType || 'bike');
+  const [distance, setDistance] = useState('');
+  const [duration, setDuration] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const types = ['bike', 'ebike', 'skates', 'scooter', 'escooter', 'other'];
+  const Icon = rideIcons[rideType] || Bike;
+
+  const submit = async () => {
+    if (!body.trim()) return;
+    setBusy(true);
+    const res = await onPublish({ rideType, body, distance: distance.trim() || null, duration: duration.trim() || null });
+    setBusy(false);
+    if (res && !res.error) {
+      setBody(''); setDistance(''); setDuration('');
+      setOpen(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="w-full bg-zinc-900 border-2 border-zinc-800 rounded-2xl p-3 flex items-center gap-3 text-left hover:border-pink-500 transition"
+      >
+        {profile?.avatar
+          ? <img src={profile.avatar} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white" />
+          : <div className="w-10 h-10 rounded-full bg-gradient-to-br from-pink-500 to-blue-500 flex items-center justify-center font-black border-2 border-white">{(profile?.name || 'R')[0]}</div>}
+        <div className="flex-1">
+          <p className="text-sm font-semibold text-zinc-400">Share how your ride went…</p>
+          <p className="text-[10px] text-zinc-600 uppercase font-black tracking-wide">Photos optional · Text + stats welcome</p>
+        </div>
+        <div className="bg-pink-500 rounded-xl px-3 py-2 font-black text-xs uppercase flex items-center gap-1 border-2 border-white">
+          <Plus size={14} /> Post
+        </div>
+      </button>
+    );
+  }
+
+  return (
+    <div className="bg-zinc-900 border-2 border-pink-500 rounded-2xl p-3 space-y-3">
+      <div className="flex items-center gap-2">
+        {profile?.avatar
+          ? <img src={profile.avatar} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white" />
+          : <div className="w-10 h-10 rounded-full bg-gradient-to-br from-pink-500 to-blue-500 flex items-center justify-center font-black border-2 border-white">{(profile?.name || 'R')[0]}</div>}
+        <div className="flex-1 min-w-0">
+          <p className="font-black text-sm truncate">{profile?.name || 'Rider'}</p>
+          <p className="text-[10px] text-zinc-400 font-semibold uppercase">Posting to global feed</p>
+        </div>
+        <button onClick={() => setOpen(false)} className="text-zinc-500 p-1"><X size={18} /></button>
+      </div>
+
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder="Route, vibes, shoutouts, what broke, what you crushed…"
+        rows={4}
+        className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-xl px-3 py-2 text-sm focus:border-pink-500 outline-none resize-none"
+        maxLength={2000}
+      />
+
+      <div>
+        <p className="text-[10px] font-black uppercase tracking-wide text-zinc-400 mb-1.5">Ride type</p>
+        <div className="flex flex-wrap gap-1.5">
+          {types.map((t) => {
+            const I = rideIcons[t] || Bike;
+            const active = rideType === t;
+            return (
+              <button
+                key={t}
+                onClick={() => setRideType(t)}
+                className={`px-2.5 py-1.5 rounded-lg border-2 flex items-center gap-1 text-[11px] font-black uppercase ${active ? `${rideColors[t]} border-white text-black` : 'bg-zinc-950 border-zinc-800 text-zinc-300'}`}
+              >
+                <I size={12} />{rideLabels[t]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-wide text-zinc-400 mb-1">Distance (opt.)</p>
+          <input
+            value={distance}
+            onChange={(e) => setDistance(e.target.value)}
+            placeholder="12 mi"
+            className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-lg px-2 py-1.5 text-sm focus:border-pink-500 outline-none"
+            maxLength={20}
+          />
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-wide text-zinc-400 mb-1">Time (opt.)</p>
+          <input
+            value={duration}
+            onChange={(e) => setDuration(e.target.value)}
+            placeholder="45 min"
+            className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-lg px-2 py-1.5 text-sm focus:border-pink-500 outline-none"
+            maxLength={20}
+          />
+        </div>
+      </div>
+
+      <button
+        onClick={submit}
+        disabled={busy || !body.trim()}
+        className="w-full py-3 rounded-xl font-black uppercase bg-gradient-to-r from-pink-500 to-blue-500 disabled:opacity-40 border-2 border-white flex items-center justify-center gap-2"
+      >
+        <Send size={16} />{busy ? 'Posting…' : 'Post to feed'}
+      </button>
+    </div>
+  );
+}
+
+function formatFeedTime(iso) {
+  if (!iso) return '';
+  const then = new Date(iso);
+  if (isNaN(then.getTime())) return '';
+  const diff = Math.floor((Date.now() - then.getTime()) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+  return then.toLocaleDateString();
+}
+
+function FeedPostCard({ post, onLike, onDelete, rideColors, rideIcons, rideLabels }) {
+  const Icon = rideIcons[post.rideType] || Bike;
+  const color = rideColors[post.rideType] || 'bg-pink-500';
+  const label = rideLabels?.[post.rideType] || 'Ride';
+  const hasStats = post.distance || post.duration;
   return (
     <div className="bg-zinc-900 rounded-2xl overflow-hidden border-2 border-zinc-800">
       <div className="p-3 flex items-center gap-2">
-        <div className={`${post.hostAvatar} w-10 h-10 rounded-full flex items-center justify-center font-black border-2 border-white`}>
-          {post.host[0]}
-        </div>
+        {post.avatar
+          ? <img src={post.avatar} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white" />
+          : <div className="bg-gradient-to-br from-pink-500 to-blue-500 w-10 h-10 rounded-full flex items-center justify-center font-black border-2 border-white">{(post.author || 'R')[0]}</div>}
         <div className="flex-1 min-w-0">
-          <p className="font-black text-sm flex items-center gap-1">{post.host}{post.hostVerified && <VerifiedBadge />}</p>
-          <p className="text-[10px] text-zinc-400 font-semibold uppercase">{post.eventTitle} · {post.time}</p>
+          <p className="font-black text-sm truncate">{post.author}</p>
+          <p className="text-[10px] text-zinc-400 font-semibold uppercase">{label} · {formatFeedTime(post.createdAt)}</p>
         </div>
-        <div className={`${rideColors[post.rideType]} w-8 h-8 rounded-lg flex items-center justify-center border-2 border-white`}>
+        <div className={`${color} w-8 h-8 rounded-lg flex items-center justify-center border-2 border-white`}>
           <Icon size={14} />
         </div>
+        {onDelete && (
+          <button onClick={onDelete} className="text-zinc-500 p-1" title="Delete post"><Trash2 size={16} /></button>
+        )}
       </div>
-      {/* Photo placeholder using gradient */}
-      <div className={`bg-gradient-to-br ${post.imageGradient} h-56 flex items-end p-3 relative overflow-hidden`}>
-        <div className="absolute top-2 right-2 bg-black/40 backdrop-blur px-2 py-1 rounded-lg text-[10px] font-black flex items-center gap-1 uppercase">
-          <Image size={10} />Ride recap
+
+      {post.imageUrl && (
+        <div className="bg-black">
+          <img src={post.imageUrl} alt="" className="w-full max-h-96 object-cover" />
         </div>
-        <div className="bg-black/50 backdrop-blur rounded-xl px-3 py-2 flex items-center gap-3">
-          <div className="text-center">
-            <p className="text-[10px] font-black uppercase opacity-80">Distance</p>
-            <p className="font-black text-sm">{post.distance}</p>
-          </div>
-          <div className="w-px h-8 bg-white/30" />
-          <div className="text-center">
-            <p className="text-[10px] font-black uppercase opacity-80">Time</p>
-            <p className="font-black text-sm">{post.duration}</p>
-          </div>
-          <div className="w-px h-8 bg-white/30" />
-          <div className="text-center">
-            <p className="text-[10px] font-black uppercase opacity-80">Riders</p>
-            <p className="font-black text-sm">{post.riderCount}</p>
+      )}
+
+      {hasStats && (
+        <div className="px-3 pb-2">
+          <div className="bg-zinc-950 border-2 border-zinc-800 rounded-xl px-3 py-2 flex items-center gap-4">
+            {post.distance && (
+              <div className="text-center">
+                <p className="text-[10px] font-black uppercase opacity-70">Distance</p>
+                <p className="font-black text-sm">{post.distance}</p>
+              </div>
+            )}
+            {post.distance && post.duration && <div className="w-px h-8 bg-zinc-800" />}
+            {post.duration && (
+              <div className="text-center">
+                <p className="text-[10px] font-black uppercase opacity-70">Time</p>
+                <p className="font-black text-sm">{post.duration}</p>
+              </div>
+            )}
           </div>
         </div>
-      </div>
-      <div className="p-3">
-        <p className="text-sm">{post.caption}</p>
-        <div className="flex items-center gap-1 mt-2 text-[10px] text-zinc-400 font-semibold uppercase">
-          <span>Shoutouts:</span>
-          {post.shoutouts.map((s, i) => <span key={i} className="text-pink-400">{s}{i < post.shoutouts.length - 1 ? ',' : ''}</span>)}
-        </div>
+      )}
+
+      <div className="p-3 pt-0">
+        <p className="text-sm whitespace-pre-wrap">{post.body}</p>
         <div className="flex items-center gap-4 mt-3 pt-3 border-t border-zinc-800">
           <button onClick={onLike} className="flex items-center gap-1.5 font-black text-sm">
             <Heart size={18} className={post.liked ? 'fill-pink-500 text-pink-500' : 'text-zinc-400'} />
-            {post.likes}
-          </button>
-          <button className="flex items-center gap-1.5 font-black text-sm text-zinc-400">
-            <MessageCircle size={18} />{post.comments.length}
+            {post.likes || 0}
           </button>
         </div>
-        {post.comments.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {post.comments.slice(0, 2).map((c, i) => (
-              <p key={i} className="text-xs"><span className="font-black">{c.user}</span> <span className="text-zinc-300">{c.text}</span></p>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1895,30 +2119,50 @@ function Onboarding({ profile, setProfile, step, setStep, onComplete }) {
 function InstallAppStep() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [installed, setInstalled] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+
+  const isIOS = typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const isStandalone = typeof window !== 'undefined' &&
+    (window.matchMedia('(display-mode: standalone)').matches ||
+     (window.navigator && window.navigator.standalone === true));
 
   useEffect(() => {
     const handler = (e) => {
       e.preventDefault();
       setDeferredPrompt(e);
     };
+    const onInstalled = () => { setInstalled(true); setShowModal(false); };
     window.addEventListener('beforeinstallprompt', handler);
-    window.addEventListener('appinstalled', () => setInstalled(true));
-    return () => window.removeEventListener('beforeinstallprompt', handler);
+    window.addEventListener('appinstalled', onInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handler);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
   }, []);
 
-  const clickInstall = async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
-    if (outcome === 'accepted') setInstalled(true);
-    setDeferredPrompt(null);
-  };
+  // Auto-popup on load (unless already installed). Small delay so the step
+  // visibly loads first — otherwise it feels like a jump-scare.
+  useEffect(() => {
+    if (isStandalone || installed) return;
+    const t = setTimeout(() => setShowModal(true), 600);
+    return () => clearTimeout(t);
+  }, [isStandalone, installed]);
 
-  // Detect iOS (needs manual Add to Home Screen via Share sheet).
-  const isIOS = typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent);
-  const isStandalone = typeof window !== 'undefined' &&
-    (window.matchMedia('(display-mode: standalone)').matches ||
-     window.navigator.standalone === true);
+  const clickInstall = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      try {
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') setInstalled(true);
+      } catch (e) { /* ignore */ }
+      setDeferredPrompt(null);
+      setShowModal(false);
+    } else {
+      // No native prompt available (iOS, or Chrome hasn't fired the event) —
+      // show the manual instructions modal.
+      setShowModal(true);
+    }
+  };
 
   return (
     <div>
@@ -1926,7 +2170,7 @@ function InstallAppStep() {
         <Upload size={38} className="text-pink-500" />
       </div>
       <h2 className="text-3xl font-black mb-2 uppercase tracking-tight text-center">Install<br />Rideout</h2>
-      <p className="text-white/90 mb-5 font-semibold text-center text-sm">Add a shortcut to your home screen so it opens like a real app.</p>
+      <p className="text-white/90 mb-5 font-semibold text-center text-sm">Add a shortcut to your home screen so it opens like a real app — no browser bars, full screen, one tap.</p>
 
       {isStandalone || installed ? (
         <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-center">
@@ -1934,33 +2178,95 @@ function InstallAppStep() {
           <p className="font-black text-sm uppercase">Installed — nice.</p>
           <p className="text-xs text-white/80 mt-1">You can keep going.</p>
         </div>
-      ) : deferredPrompt ? (
-        <button
-          onClick={clickInstall}
-          className="w-full bg-white text-pink-600 font-black py-3.5 rounded-2xl flex items-center justify-center gap-2 text-base border-4 border-blue-500 uppercase tracking-wide shadow-xl active:scale-95">
-          <Upload size={18} />Install app
-        </button>
-      ) : isIOS ? (
-        <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-sm space-y-2 font-semibold">
-          <p className="font-black uppercase tracking-wide text-xs">iPhone / iPad</p>
-          <ol className="list-decimal list-inside space-y-1 text-white/95">
-            <li>Tap the <span className="font-black">Share</span> button at the bottom of Safari (the square with the up arrow).</li>
-            <li>Scroll down, tap <span className="font-black">Add to Home Screen</span>.</li>
-            <li>Tap <span className="font-black">Add</span> — the Rideout icon appears on your home screen.</li>
-          </ol>
-        </div>
       ) : (
-        <div className="bg-white/15 backdrop-blur rounded-2xl p-4 border-2 border-white/40 text-sm space-y-2 font-semibold">
-          <p className="font-black uppercase tracking-wide text-xs">Android / Chrome</p>
-          <ol className="list-decimal list-inside space-y-1 text-white/95">
-            <li>Tap the <span className="font-black">⋮</span> menu in Chrome (top-right).</li>
-            <li>Tap <span className="font-black">Install app</span> or <span className="font-black">Add to Home screen</span>.</li>
-            <li>Confirm — Rideout lives on your home screen like any other app.</li>
-          </ol>
-        </div>
+        <>
+          {/* Always-visible big button. Triggers the native prompt if available,
+              otherwise opens the manual instructions modal. */}
+          <button
+            onClick={clickInstall}
+            className="w-full bg-white text-pink-600 font-black py-4 rounded-2xl flex items-center justify-center gap-2 text-lg border-4 border-blue-500 uppercase tracking-wide shadow-2xl active:scale-95 animate-pulse"
+          >
+            <Upload size={22} />Download App
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="w-full mt-2 text-xs text-white/90 underline font-semibold"
+          >
+            Show me how to install step-by-step
+          </button>
+        </>
       )}
 
-      <p className="text-[11px] text-white/70 mt-4 text-center">Optional — you can skip this and install later from the Profile screen.</p>
+      <p className="text-[11px] text-white/70 mt-4 text-center">Optional — you can skip this and install later.</p>
+
+      {showModal && !isStandalone && !installed && (
+        <InstallInstructionsModal
+          isIOS={isIOS}
+          hasDeferredPrompt={!!deferredPrompt}
+          onInstall={clickInstall}
+          onClose={() => setShowModal(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function InstallInstructionsModal({ isIOS, hasDeferredPrompt, onInstall, onClose }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-zinc-900 border-2 border-pink-500 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start gap-3">
+          <div className="w-12 h-12 bg-gradient-to-br from-pink-500 to-blue-500 rounded-2xl flex items-center justify-center border-2 border-white flex-shrink-0">
+            <Upload size={22} className="text-white" />
+          </div>
+          <div className="flex-1">
+            <h3 className="font-black text-lg uppercase leading-tight">Download Rideout</h3>
+            <p className="text-xs text-zinc-400 font-semibold uppercase tracking-wide">Add to your home screen</p>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 p-1"><X size={20} /></button>
+        </div>
+
+        {hasDeferredPrompt ? (
+          <button
+            onClick={onInstall}
+            className="w-full bg-gradient-to-r from-pink-500 to-blue-500 font-black py-3.5 rounded-2xl flex items-center justify-center gap-2 border-2 border-white uppercase tracking-wide shadow-xl active:scale-95"
+          >
+            <Upload size={18} />Install now
+          </button>
+        ) : isIOS ? (
+          <div className="bg-zinc-950 rounded-xl p-4 border-2 border-zinc-800 text-sm space-y-2 font-semibold">
+            <p className="font-black uppercase tracking-wide text-xs text-pink-400">iPhone / iPad</p>
+            <ol className="list-decimal list-inside space-y-1.5 text-zinc-200">
+              <li>Tap the <span className="font-black text-pink-400">Share</span> button at the bottom of Safari — the square with the up-arrow.</li>
+              <li>Scroll down and tap <span className="font-black text-pink-400">Add to Home Screen</span>.</li>
+              <li>Tap <span className="font-black text-pink-400">Add</span> — the Rideout icon appears on your home screen.</li>
+            </ol>
+            <p className="text-[11px] text-zinc-500 pt-2">You have to be in Safari — the button doesn't exist in Chrome on iPhone.</p>
+          </div>
+        ) : (
+          <div className="bg-zinc-950 rounded-xl p-4 border-2 border-zinc-800 text-sm space-y-2 font-semibold">
+            <p className="font-black uppercase tracking-wide text-xs text-pink-400">Android / Chrome</p>
+            <ol className="list-decimal list-inside space-y-1.5 text-zinc-200">
+              <li>Tap the <span className="font-black text-pink-400">⋮</span> menu in Chrome (top-right of the browser).</li>
+              <li>Tap <span className="font-black text-pink-400">Install app</span> or <span className="font-black text-pink-400">Add to Home screen</span>.</li>
+              <li>Confirm — Rideout lives on your home screen like any other app.</li>
+            </ol>
+          </div>
+        )}
+
+        <button
+          onClick={onClose}
+          className="w-full py-2.5 rounded-xl font-black uppercase text-sm bg-zinc-800 border-2 border-zinc-700 active:scale-95"
+        >
+          Got it
+        </button>
+      </div>
     </div>
   );
 }

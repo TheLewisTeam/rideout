@@ -93,18 +93,48 @@ create table if not exists public.chat_messages (
 create index if not exists chat_messages_room_sent_at_idx
   on public.chat_messages (room, sent_at desc);
 
+-- Feed posts: ride recaps shared to the global feed.
+create table if not exists public.feed_posts (
+  id           uuid primary key default gen_random_uuid(),
+  author_name  text,
+  author_code  text,
+  avatar       text,
+  ride_type    text,
+  body         text not null,
+  image_url    text,
+  distance     text,
+  duration     text,
+  created_at   timestamptz default now()
+);
+create index if not exists feed_posts_created_at_idx
+  on public.feed_posts (created_at desc);
+
+-- Feed post likes: one row per (post, rider). Unique constraint = dedupe.
+create table if not exists public.feed_post_likes (
+  id          uuid primary key default gen_random_uuid(),
+  post_id     uuid not null references public.feed_posts(id) on delete cascade,
+  rider_code  text not null,
+  liked_at    timestamptz default now()
+);
+create unique index if not exists feed_post_likes_unique
+  on public.feed_post_likes (post_id, rider_code);
+create index if not exists feed_post_likes_post_idx
+  on public.feed_post_likes (post_id);
+
 -- ============================================================
 -- RLS — open policies (anon key can read/write).
 -- This is an open social-network style app with no auth yet.
 -- Tighten these once you add Supabase Auth.
 -- ============================================================
 
-alter table public.riders         enable row level security;
-alter table public.pages          enable row level security;
-alter table public.links          enable row level security;
-alter table public.rideouts       enable row level security;
-alter table public.rideout_joins  enable row level security;
-alter table public.chat_messages  enable row level security;
+alter table public.riders          enable row level security;
+alter table public.pages           enable row level security;
+alter table public.links           enable row level security;
+alter table public.rideouts        enable row level security;
+alter table public.rideout_joins   enable row level security;
+alter table public.chat_messages   enable row level security;
+alter table public.feed_posts      enable row level security;
+alter table public.feed_post_likes enable row level security;
 
 drop policy if exists "anon all riders" on public.riders;
 create policy "anon all riders"
@@ -130,6 +160,14 @@ drop policy if exists "anon all chat" on public.chat_messages;
 create policy "anon all chat"
   on public.chat_messages for all using (true) with check (true);
 
+drop policy if exists "anon all feed_posts" on public.feed_posts;
+create policy "anon all feed_posts"
+  on public.feed_posts for all using (true) with check (true);
+
+drop policy if exists "anon all feed_post_likes" on public.feed_post_likes;
+create policy "anon all feed_post_likes"
+  on public.feed_post_likes for all using (true) with check (true);
+
 -- ============================================================
 -- Realtime — stream row changes to subscribed clients.
 -- Safe to re-run: ignores "already member of publication" errors.
@@ -153,6 +191,12 @@ begin
   exception when duplicate_object then null;
   end;
   begin alter publication supabase_realtime add table public.chat_messages;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.feed_posts;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.feed_post_likes;
   exception when duplicate_object then null;
   end;
 end $$;

@@ -377,3 +377,119 @@ export function subscribeChat(room = 'global', onNewMessage) {
     .subscribe();
   return () => supabase.removeChannel(channel);
 }
+
+// --- Ride Feed -------------------------------------------------------------
+
+// Map a feed_posts row to the shape the UI uses.
+function feedRowToPost(r, likeCount = 0, likedByMe = false) {
+  return {
+    id: r.id,
+    author: r.author_name || 'Rider',
+    authorCode: r.author_code || null,
+    avatar: r.avatar || null,
+    rideType: r.ride_type || 'bike',
+    body: r.body || '',
+    imageUrl: r.image_url || null,
+    distance: r.distance || null,
+    duration: r.duration || null,
+    createdAt: r.created_at,
+    likes: likeCount,
+    liked: likedByMe,
+    comments: [],
+  };
+}
+
+export async function fetchFeedPosts(viewerCode) {
+  if (!supabase) return [];
+  const { data: rows, error } = await supabase
+    .from('feed_posts')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (error) {
+    console.warn('[rideout] fetchFeedPosts', error.message);
+    return [];
+  }
+  const ids = (rows ?? []).map((r) => r.id);
+  const counts = {};
+  const mine = new Set();
+  if (ids.length) {
+    const { data: likes } = await supabase
+      .from('feed_post_likes')
+      .select('post_id, rider_code')
+      .in('post_id', ids);
+    (likes ?? []).forEach((l) => {
+      counts[l.post_id] = (counts[l.post_id] || 0) + 1;
+      if (viewerCode && l.rider_code === viewerCode) mine.add(l.post_id);
+    });
+  }
+  return (rows ?? []).map((r) => feedRowToPost(r, counts[r.id] || 0, mine.has(r.id)));
+}
+
+export async function createFeedPost({ authorName, authorCode, avatar, rideType, body, imageUrl, distance, duration }) {
+  if (!supabase) return { error: 'offline' };
+  if (!body || !body.trim()) return { error: 'Write something first.' };
+  const { data, error } = await supabase
+    .from('feed_posts')
+    .insert({
+      author_name: authorName || 'Rider',
+      author_code: authorCode || null,
+      avatar: avatar || null,
+      ride_type: rideType || 'bike',
+      body: body.trim().slice(0, 2000),
+      image_url: imageUrl || null,
+      distance: distance || null,
+      duration: duration || null,
+    })
+    .select()
+    .single();
+  if (error) {
+    console.warn('[rideout] createFeedPost', error.message);
+    return { error: error.message };
+  }
+  return { data: feedRowToPost(data, 0, false) };
+}
+
+export async function deleteFeedPost(postId) {
+  if (!supabase || !postId) return;
+  const { error } = await supabase.from('feed_posts').delete().eq('id', postId);
+  if (error) console.warn('[rideout] deleteFeedPost', error.message);
+}
+
+export async function toggleFeedLike({ postId, riderCode, liked }) {
+  if (!supabase || !postId || !riderCode) return;
+  if (liked) {
+    const { error } = await supabase
+      .from('feed_post_likes')
+      .delete()
+      .eq('post_id', postId)
+      .eq('rider_code', riderCode);
+    if (error) console.warn('[rideout] toggleFeedLike(off)', error.message);
+  } else {
+    const { error } = await supabase
+      .from('feed_post_likes')
+      .upsert(
+        { post_id: postId, rider_code: riderCode },
+        { onConflict: 'post_id,rider_code' },
+      );
+    if (error) console.warn('[rideout] toggleFeedLike(on)', error.message);
+  }
+}
+
+export function subscribeFeed(onChange) {
+  if (!supabase) return () => {};
+  const channel = supabase
+    .channel('feed:all')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'feed_posts' },
+      (payload) => onChange(payload),
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'feed_post_likes' },
+      (payload) => onChange(payload),
+    )
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
